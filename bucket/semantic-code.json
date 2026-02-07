@@ -6,7 +6,7 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/Luiz-Frias/semantic-code-agx/releases/download/v0.1.1/sca-0.1.1-x86_64-pc-windows-msvc.zip",
-      "hash": "4b002e3d7d1047a8538869f363d6fe0d56092587e8098c8b752f31fc80baeb14"
+      "hash": "2ede618d15cde1cf31ea723426db123b34d8cf7e5b80acbc3d5a81f5cab0a685"
     }
   },
   "bin": [
