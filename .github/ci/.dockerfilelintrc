@@ -1,0 +1,8 @@
+rules:
+  # Allow multi-stage aliases and modern Dockerfile features (e.g., heredoc COPY).
+  missing_tag: off
+  required_params: off
+  invalid_line: off
+  invalid_command: off
+  missing_args: off
+  uppercase_commands: off

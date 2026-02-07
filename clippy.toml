@@ -1,0 +1,89 @@
+# =============================================================================
+# CLIPPY CONFIGURATION
+# =============================================================================
+# Lint configuration for the semantic-code-agx workspace.
+# Run: cargo clippy --workspace --all-targets -- -D warnings
+# =============================================================================
+
+# Maximum cognitive complexity allowed for functions
+# Helps keep functions understandable and maintainable
+cognitive-complexity-threshold = 25
+
+# Maximum number of lines in a function body
+# Encourages breaking down large functions
+too-many-lines-threshold = 100
+
+# Maximum number of arguments a function can have
+too-many-arguments-threshold = 7
+
+# Struct fields threshold for "large" types
+# Affects clippy::large_types_passed_by_value
+pass-by-value-size-limit = 256
+
+# Types that are allowed to use unwrap/expect
+# Empty = no exceptions, enforces proper error handling everywhere
+allowed-duplicate-crates = []
+
+# Disallowed methods (project policy: no panics in production code)
+# These are enforced via cargo clippy args in pre-commit, but documented here
+# - unwrap() - use .ok_or() or .map_err() instead
+# - expect() - use .ok_or() or .map_err() instead
+# - panic!() - use Result and error types
+# - todo!() - not allowed in main branch
+# - unimplemented!() - not allowed in main branch
+
+# Doc comment linting
+doc-valid-idents = [
+  "OpenAI",
+  "Gemini",
+  "Ollama",
+  "Voyage",
+  "ONNX",
+  "Milvus",
+  "HNSW",
+  "BM25",
+  "RRF",
+  "gRPC",
+  "REST",
+  "API",
+  "CLI",
+  "UTF",
+  "URL",
+  "JSON",
+  "TOML",
+  "YAML",
+  "AST",
+  "LRU",
+  "UUID",
+]
+
+# MSRV for lint suggestions
+msrv = "1.95.0"
+
+# =============================================================================
+# NOTES ON LINT LEVELS
+# =============================================================================
+# Lint levels are configured in Cargo.toml [workspace.lints.clippy] section
+# and via pre-commit args. This file only contains configuration VALUES.
+#
+# Key denials (set in Cargo.toml):
+# - clippy::unwrap_used = "deny"
+# - clippy::expect_used = "deny"
+# - clippy::panic = "deny"
+# - clippy::todo = "warn" (strict deny on main/staging via CI)
+# - clippy::unimplemented = "warn" (strict deny on main/staging via CI)
+# - clippy::allow_attributes_without_reason = "deny" (workspace baseline)
+#
+# =============================================================================
+# #[allow(...)] POLICY (enforced via two clippy runs)
+# =============================================================================
+# Production code (--lib --bins):
+#   -D clippy::allow_attributes → NO #[allow(...)] permitted
+#
+# Test code (--tests --benches):
+#   -D clippy::allow_attributes_without_reason → #[allow(..., reason="...")] required
+#
+# Example valid test allow:
+#   #[allow(clippy::unwrap_used, reason = "test assertion - panic is expected")]
+#
+# =============================================================================

@@ -1,0 +1,13 @@
+# Index pipeline FSM spec
+# States
+Prepared
+Scanned
+Embedded
+Inserted
+Completed
+
+# Transitions
+Prepared -> Scanned
+Scanned -> Embedded
+Embedded -> Inserted
+Inserted -> Completed

@@ -1,0 +1,8 @@
+{
+  "codebaseRoot": "/tmp/example-codebase",
+  "query": "hello",
+  "topK": 10,
+  "threshold": 0.5,
+  "filterExpr": "relativePath == 'src/main.rs'",
+  "includeContent": true
+}

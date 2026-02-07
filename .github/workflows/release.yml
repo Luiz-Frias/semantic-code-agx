@@ -1,0 +1,337 @@
+# =============================================================================
+# Release Workflow - Build + Package + Publish GitHub Release Assets
+# =============================================================================
+#
+# Produces per-target archives and `.sha256` checksum files for the `sca` CLI.
+# Uploads artifacts to the matching GitHub Release (tagged `v*`).
+#
+# Artifacts:
+# - macOS/Linux: `sca-<version>-<target>.tar.gz` + `.sha256`
+# - Windows:     `sca-<version>-<target>.zip`    + `.sha256`
+# - `install.sh` (install helper for macOS/Linux)
+#
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preflight:
+    name: Preflight (final tags only; must be main HEAD)
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - name: Checkout (tag)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag policy
+        id: check
+        run: |
+          set -euo pipefail
+
+          TAG_SHA="$(git rev-parse HEAD)"
+          TAG_NAME="${GITHUB_REF_NAME}"
+
+          # RC tags are allowed for tracking, but do not publish release artifacts.
+          if [[ "${TAG_NAME}" == *-rc.* ]]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "Release preflight: SKIPPED"
+              echo ""
+              echo "RC tag detected; this workflow only publishes final releases from \`main\`."
+              echo ""
+              echo "- Tag: \`${TAG_NAME}\`"
+              echo "- Tag commit: \`${TAG_SHA}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git fetch origin main --depth=1
+          MAIN_SHA="$(git rev-parse origin/main)"
+
+          if [[ "${TAG_SHA}" != "${MAIN_SHA}" ]]; then
+            {
+              echo "Release preflight: FAILED"
+              echo ""
+              echo "This workflow only publishes releases for tags that point to \`main\` HEAD."
+              echo ""
+              echo "- Tag: \`${TAG_NAME}\`"
+              echo "- Tag commit: \`${TAG_SHA}\`"
+              echo "- main head: \`${MAIN_SHA}\`"
+              echo ""
+              echo "Fix:"
+              echo "1) Merge to \`main\`"
+              echo "2) Pull latest \`main\`"
+              echo "3) Create and push the tag from \`main\` HEAD"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "Release preflight: OK"
+            echo ""
+            echo "- Tag: \`${TAG_NAME}\`"
+            echo "- Tag commit: \`${TAG_SHA}\`"
+            echo "- main head: \`${MAIN_SHA}\`"
+            echo ""
+            echo "Proceeding with release build/publish."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: preflight
+    if: needs.preflight.outputs.should_release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_format: tar.gz
+            bin_ext: ""
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive_format: tar.gz
+            bin_ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_format: zip
+            bin_ext: ".exe"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Linux build deps (mold)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build (release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p semantic-code-cli --release --bin sca --target "${{ matrix.target }}"
+
+      - name: Smoke (binary runs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "target/${{ matrix.target }}/release/sca${{ matrix.bin_ext }}" --version
+
+      - name: Package (archive + checksum)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          python scripts/release/package_artifacts.py \
+            --version "${VERSION}" \
+            --target "${{ matrix.target }}" \
+            --bin-path "target/${{ matrix.target }}/release/sca${{ matrix.bin_ext }}" \
+            --format "${{ matrix.archive_format }}" \
+            --out-dir dist
+
+      - name: Verify packaged artifact runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARGET="${{ matrix.target }}"
+          FORMAT="${{ matrix.archive_format }}"
+          ARCHIVE="dist/sca-${VERSION}-${TARGET}.${FORMAT}"
+          python scripts/release/verify_archive.py --archive "${ARCHIVE}"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: sca-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [preflight, build]
+    if: needs.preflight.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Add install script (release asset)
+        run: |
+          set -euo pipefail
+          cp scripts/install.sh dist/install.sh
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/sca-*.tar.gz
+            dist/sca-*.zip
+            dist/sca-*.sha256
+            dist/install.sh
+
+  scoop:
+    name: Update Scoop Bucket
+    needs: [preflight, publish]
+    if: needs.preflight.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Update scoop manifest
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ZIP_SHA_FILE="dist/sca-${VERSION}-x86_64-pc-windows-msvc.sha256"
+          if [[ ! -f "${ZIP_SHA_FILE}" ]]; then
+            echo "✗ missing checksum file: ${ZIP_SHA_FILE}" >&2
+            exit 1
+          fi
+
+          SHA="$(awk '{print $1}' "${ZIP_SHA_FILE}")"
+          if [[ -z "${SHA}" ]]; then
+            echo "✗ failed to parse sha256 from ${ZIP_SHA_FILE}" >&2
+            exit 1
+          fi
+
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/sca-${VERSION}-x86_64-pc-windows-msvc.zip"
+
+          jq \
+            --arg version "${VERSION}" \
+            --arg url "${URL}" \
+            --arg sha "${SHA}" \
+            '.version = $version
+             | .architecture."64bit".url = $url
+             | .architecture."64bit".hash = $sha' \
+            bucket/semantic-code.json > bucket/semantic-code.json.tmp
+          mv bucket/semantic-code.json.tmp bucket/semantic-code.json
+
+      - name: Commit and push (if changed)
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- bucket/semantic-code.json; then
+            echo "✓ scoop manifest already up to date"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/semantic-code.json
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          git commit -m "chore(scoop): update semantic-code to v${VERSION}"
+          git push origin HEAD:main
+
+  homebrew:
+    name: Update Homebrew Tap
+    needs: [preflight, publish]
+    if: needs.preflight.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (tag)
+        uses: actions/checkout@v6
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify required secret is set
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }} # pragma: allowlist secret
+        run: | # pragma: allowlist secret
+          set -euo pipefail
+          if [[ -z "${HOMEBREW_TAP_TOKEN}" ]]; then # pragma: allowlist secret
+            echo "✗ missing required secret: HOMEBREW_TAP_TOKEN" >&2 # pragma: allowlist secret
+            exit 1
+          fi
+
+      - name: Checkout tap repo
+        uses: actions/checkout@v6
+        with:
+          repository: Luiz-Frias/homebrew-tap
+          ref: main
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }} # pragma: allowlist secret
+
+      - name: Render formula
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          SHA_MACOS_ARM64="$(awk '{print $1}' "dist/sca-${VERSION}-aarch64-apple-darwin.sha256")"
+          SHA_LINUX_X86_64="$(awk '{print $1}' "dist/sca-${VERSION}-x86_64-unknown-linux-gnu.sha256")"
+
+          for var in SHA_MACOS_ARM64 SHA_LINUX_X86_64; do
+            if [[ -z "${!var}" ]]; then
+              echo "✗ failed to read ${var} from dist/*.sha256" >&2
+              exit 1
+            fi
+          done
+
+          mkdir -p homebrew-tap/Formula
+          sed \
+            -e "s/{{version}}/${VERSION}/g" \
+            -e "s/{{sha256_macos_arm64}}/${SHA_MACOS_ARM64}/g" \
+            -e "s/{{sha256_linux_x86_64}}/${SHA_LINUX_X86_64}/g" \
+            packaging/homebrew/semantic-code.rb.template \
+            > homebrew-tap/Formula/semantic-code.rb
+
+      - name: Commit and push (if changed)
+        run: |
+          set -euo pipefail
+          cd homebrew-tap
+
+          if git diff --quiet -- Formula/semantic-code.rb; then
+            echo "✓ Homebrew formula already up to date"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/semantic-code.rb
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          git commit -m "chore(homebrew): update semantic-code to v${VERSION}"
+          git push origin HEAD:main

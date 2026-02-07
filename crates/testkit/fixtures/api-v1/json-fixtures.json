@@ -1,0 +1,84 @@
+{
+  "errorDto": {
+    "code": "ERR_DOMAIN_INVALID_COLLECTION_NAME",
+    "message": "CollectionName must match /^[a-zA-Z][a-zA-Z0-9_]*$/",
+    "kind": "EXPECTED",
+    "meta": {
+      "input": "bad-name",
+      "token": "[REDACTED]",
+      "query": "[REDACTED,len=11]"
+    }
+  },
+  "okResult": {
+    "ok": true,
+    "data": {
+      "indexedFiles": 3,
+      "totalChunks": 7,
+      "status": "completed"
+    }
+  },
+  "errorResult": {
+    "ok": false,
+    "error": {
+      "code": "ERR_DOMAIN_INVALID_COLLECTION_NAME",
+      "message": "CollectionName must match /^[a-zA-Z][a-zA-Z0-9_]*$/",
+      "kind": "EXPECTED",
+      "meta": {
+        "input": "bad-name",
+        "token": "[REDACTED]",
+        "query": "[REDACTED,len=11]"
+      }
+    }
+  },
+  "indexRequest": {
+    "codebaseRoot": "/tmp/repo",
+    "collectionName": "code_chunks_123",
+    "forceReindex": true
+  },
+  "indexResponse": {
+    "indexedFiles": 3,
+    "totalChunks": 7,
+    "status": "completed"
+  },
+  "searchRequest": {
+    "codebaseRoot": "/tmp/repo",
+    "query": "hello",
+    "topK": 5,
+    "threshold": 0.42,
+    "filterExpr": ""
+  },
+  "searchResult": {
+    "content": "fn main() {}",
+    "relativePath": "src/main.rs",
+    "startLine": 1,
+    "endLine": 1,
+    "language": "rust",
+    "score": 0.88
+  },
+  "searchResponse": {
+    "results": [
+      {
+        "content": "fn main() {}",
+        "relativePath": "src/main.rs",
+        "startLine": 1,
+        "endLine": 1,
+        "language": "rust",
+        "score": 0.88
+      }
+    ]
+  },
+  "reindexByChangeRequest": {
+    "codebaseRoot": "/tmp/repo"
+  },
+  "reindexByChangeResponse": {
+    "added": 1,
+    "removed": 2,
+    "modified": 3
+  },
+  "clearIndexRequest": {
+    "codebaseRoot": "/tmp/repo"
+  },
+  "clearIndexResponse": {
+    "cleared": true
+  }
+}

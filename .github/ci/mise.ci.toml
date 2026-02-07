@@ -1,0 +1,45 @@
+# mise.ci.toml - CI-specific tool configuration
+# =============================================================================
+# Stripped-down mise config for CI containers.
+# Excludes local-dev-only tools (sccache, bacon) that either:
+#   - Don't support linux/arm64 (sccache via aqua)
+#   - Are TUI tools not useful in CI (bacon)
+#
+# Build Cloud provides its own caching, so sccache isn't needed in CI anyway.
+# =============================================================================
+
+[env]
+RUST_BACKTRACE = "1"
+CARGO_TERM_COLOR = "always"
+# No sccache in CI - Build Cloud handles caching
+CARGO_INCREMENTAL = "1"
+# Clippy flags (same as main mise.toml)
+CLIPPY_FLAGS = "-D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::allow_attributes -W clippy::await_holding_lock -W clippy::dbg_macro -W clippy::todo -W clippy::unimplemented -D unused_must_use"
+CLIPPY_FLAGS_TEST = "-D warnings -D clippy::allow_attributes_without_reason -W clippy::await_holding_lock -W clippy::dbg_macro"
+
+[tools]
+# Rust nightly (edition 2024)
+rust = "nightly"
+just = "latest"
+# Native build tools for optional features (onnx/tokenizers/grpc)
+cmake = "latest"
+protoc = "latest"
+# prek (pre-commit-rs) - fast Rust-based pre-commit runner
+"github:j178/prek" = "latest"
+# SOPS + age - encrypted secrets management
+sops = "latest"
+age = "latest"
+# uv - fast Python package manager (manages .venv)
+uv = "latest"
+# Shell script quality tools (for prek hooks)
+shellcheck = "latest" # Shell script linter
+shfmt = "latest"      # Shell script formatter
+bats = "latest"       # Bash automated testing
+# Linting tools (for prek hooks)
+hadolint = "latest"   # Dockerfile linter
+yamllint = "latest"   # YAML linter
+actionlint = "latest" # GitHub Actions workflow linter
+
+# NOT included (local-dev only):
+# - sccache (aqua doesn't support linux/arm64, Build Cloud caches instead)
+# - bacon (TUI tool, not useful in headless CI)

@@ -1,0 +1,27 @@
+[package]
+name = "semantic-code-facade"
+description = "Facade API for semantic-code-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+milvus = ["milvus-grpc", "milvus-rest"]
+milvus-grpc = ["semantic-code-infra/milvus-grpc"]
+milvus-rest = ["semantic-code-infra/milvus-rest"]
+
+[dependencies]
+semantic-code-infra.workspace = true
+semantic-code-api.workspace = true
+semantic-code-app.workspace = true
+semantic-code-domain.workspace = true
+semantic-code-config.workspace = true
+
+[dev-dependencies]

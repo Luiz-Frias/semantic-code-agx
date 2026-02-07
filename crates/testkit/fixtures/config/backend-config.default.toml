@@ -1,0 +1,55 @@
+version = 1
+
+[core]
+timeoutMs = 30000
+maxConcurrency = 8
+maxChunkChars = 2500
+
+[core.retry]
+maxAttempts = 3
+baseDelayMs = 250
+maxDelayMs = 5000
+jitterRatioPct = 20
+
+[embedding]
+timeoutMs = 60000
+batchSize = 32
+localFirst = false
+localOnly = false
+
+[embedding.onnx]
+downloadOnMissing = true
+sessionPoolSize = 1
+
+[embedding.cache]
+enabled = false
+maxEntries = 2048
+maxBytes = 134217728
+diskEnabled = false
+diskMaxBytes = 1073741824
+
+[vectorDb]
+ssl = false
+indexMode = "dense"
+timeoutMs = 60000
+indexTimeoutMs = 60000
+batchSize = 128
+snapshotStorage = "project"
+
+[sync]
+allowedExtensions = [
+  "c",
+  "cpp",
+  "go",
+  "java",
+  "js",
+  "jsx",
+  "md",
+  "py",
+  "rs",
+  "ts",
+  "tsx",
+]
+ignorePatterns = [".git/", "node_modules/", "target/"]
+maxFiles = 250000
+maxFileSizeBytes = 2000000

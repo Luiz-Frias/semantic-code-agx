@@ -1,0 +1,18 @@
+{
+  "collection": {
+    "codebaseRoot": "/tmp/example-codebase",
+    "indexMode": "dense",
+    "expected": "code_chunks_ea6f3b5e"
+  },
+  "codebase": {
+    "codebaseRoot": "/tmp/example-codebase-2",
+    "expected": "codebase_dbdae6de5a20"
+  },
+  "chunk": {
+    "relativePath": "src/main.rs",
+    "startLine": 1,
+    "endLine": 3,
+    "content": "fn main() {\n    println!(\"hi\");\n}\n",
+    "expected": "chunk_60f65cfc556c5638"
+  }
+}

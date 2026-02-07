@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "core": {
+    "timeoutMs": 45000,
+    "maxConcurrency": 16
+  },
+  "embedding": {
+    "provider": " openai ",
+    "dimension": 1536,
+    "timeoutMs": 60000,
+    "batchSize": 32
+  },
+  "vectorDb": {
+    "provider": " local ",
+    "indexMode": "dense",
+    "timeoutMs": 60000,
+    "batchSize": 128
+  },
+  "sync": {
+    "allowedExtensions": [" TSX ", ".rs", "ts", "*.RS", "tsx"],
+    "ignorePatterns": [" target/", "node_modules/", "dist\\\\", "node_modules/"],
+    "maxFiles": 250000,
+    "maxFileSizeBytes": 2000000
+  }
+}

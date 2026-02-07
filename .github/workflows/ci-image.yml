@@ -1,0 +1,176 @@
+# =============================================================================
+# CI Image Builder (Docker Build Cloud)
+# =============================================================================
+# Builds the CI toolchain image using Docker Build Cloud for fast builds.
+# Called by ci.yml orchestrator when toolchain-related files change.
+#
+# Required secrets:
+#   DOCKER_PAT - Docker Hub Personal Access Token (with Build Cloud access)
+#
+# Required variables:
+#   DOCKER_USER - Docker Hub username
+#
+# Triggers:
+#   - workflow_call: Called by ci.yml orchestrator (primary)
+#   - workflow_dispatch: Manual rebuilds
+# =============================================================================
+
+name: CI Image
+
+on:
+  # Called by ci.yml orchestrator
+  workflow_call:
+    secrets:
+      DOCKER_PAT:
+        required: true
+
+  # Manual trigger for rebuilds
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force rebuild even if cache hit"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GHCR_REGISTRY: ghcr.io
+  # Docker Build Cloud builder endpoint (use existing builder from build.docker.com)
+  BUILDX_ENDPOINT: ${{ vars.DOCKER_USER }}/small-lang-model
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect what changed to provide context in summary
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      toolchain: ${{ steps.filter.outputs.toolchain }}
+      dockerfile: ${{ steps.filter.outputs.dockerfile }}
+      deps: ${{ steps.filter.outputs.deps }}
+      hooks: ${{ steps.filter.outputs.hooks }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Detect changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            toolchain:
+              - 'mise.toml'
+            dockerfile:
+              - '.github/ci/Dockerfile'
+              - '.github/docker-compose.ci.yml'
+            deps:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            hooks:
+              - '.pre-commit-config.yaml'
+              - 'justfile'
+
+  # ---------------------------------------------------------------------------
+  # Build CI image with Docker Build Cloud
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build CI Image
+    runs-on: ubuntu-latest
+    needs: changes
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set lowercase image name
+        run: |
+          # CI images are hosted on the private repo's GHCR registry
+          echo "CI_IMAGE=ghcr.io/luiz-frias/semantic-code-agents-rs-ci" >> "$GITHUB_ENV"
+
+      # Login to Docker Hub (required for Build Cloud)
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      # Login to GHCR (for pushing the image)
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Docker Build Cloud setup
+      - name: Set up Docker Buildx (Build Cloud)
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: "lab:latest"
+          driver: cloud
+          endpoint: ${{ env.BUILDX_ENDPOINT }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.CI_IMAGE }}
+          tags: |
+            # main branch: nightly + latest (production-ready)
+            type=raw,value=nightly,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # staging branch: staging tag (pre-production)
+            type=raw,value=staging,enable=${{ github.ref == 'refs/heads/staging' }}
+            # dev branch: nightly-dev tag (development baseline)
+            type=raw,value=nightly-dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            # All branches: SHA tag for traceability
+            type=sha,prefix=
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .github/ci/Dockerfile
+          target: ci
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Docker Build Cloud can't push to GHCR (no GITHUB_TOKEN access).
+          # For PRs: cache only. For pushes: load locally, then push from runner.
+          load: ${{ github.event_name != 'pull_request' }}
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || '' }}
+          provenance: false
+
+      - name: Push to GHCR
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # Push each tag from the locally loaded image
+          echo "$TAGS" | while IFS= read -r tag; do
+            [ -n "$tag" ] && echo "Pushing $tag..." && docker push "$tag"
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "## 🐳 CI Image Built (Build Cloud)"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Image | \`${{ env.CI_IMAGE }}:nightly\` |"
+            echo "| Builder | \`${{ env.BUILDX_ENDPOINT }}\` |"
+            echo "| SHA | \`${{ github.sha }}\` |"
+            echo ""
+            echo "### 🔍 Change Detection"
+            echo "| Category | Changed |"
+            echo "|----------|---------|"
+            echo "| Toolchain (mise.toml) | ${{ needs.changes.outputs.toolchain }} |"
+            echo "| Dockerfile | ${{ needs.changes.outputs.dockerfile }} |"
+            echo "| Dependencies (Cargo.*) | ${{ needs.changes.outputs.deps }} |"
+            echo "| Hooks/Tasks | ${{ needs.changes.outputs.hooks }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

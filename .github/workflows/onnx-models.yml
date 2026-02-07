@@ -1,0 +1,183 @@
+# =============================================================================
+# ONNX Model Image Builder (Docker Build Cloud)
+# =============================================================================
+# Builds the model layer image separately from CI tooling.
+# Called by ci.yml orchestrator when model-related files change.
+#
+# Required secrets:
+#   DOCKER_PAT - Docker Hub Personal Access Token (with Build Cloud access)
+#
+# Required variables:
+#   DOCKER_USER - Docker Hub username
+#
+# Triggers:
+#   - workflow_call: Called by ci.yml orchestrator (primary)
+#   - workflow_dispatch: Manual rebuilds
+# =============================================================================
+
+name: ONNX Models
+
+on:
+  # Called by ci.yml orchestrator
+  workflow_call:
+    secrets:
+      DOCKER_PAT:
+        required: true
+
+  # Manual trigger for rebuilds
+  workflow_dispatch:
+    inputs:
+      model_slug:
+        description: "HuggingFace model slug (e.g., Xenova/all-MiniLM-L6-v2)"
+        required: false
+        default: "Xenova/all-MiniLM-L6-v2"
+      force_rebuild:
+        description: "Force rebuild even if cache exists"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GHCR_REGISTRY: ghcr.io
+  BUILDX_ENDPOINT: ${{ vars.DOCKER_USER }}/small-lang-model
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect what changed
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      script: ${{ steps.filter.outputs.script }}
+      dockerfile: ${{ steps.filter.outputs.dockerfile }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Detect changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            script:
+              - 'scripts/ci/ensure_onnx_assets.sh'
+            dockerfile:
+              - '.github/ci/Dockerfile.onnx'
+
+  # ---------------------------------------------------------------------------
+  # Build model image
+  # ---------------------------------------------------------------------------
+  build-model-image:
+    name: Build ONNX Model Image
+    runs-on: ubuntu-latest
+    needs: changes
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Extract model slug and set image name
+        id: model
+        env:
+          MODEL_SLUG: ${{ inputs.model_slug || 'Xenova/all-MiniLM-L6-v2' }}
+        run: |
+          # ONNX model images are hosted on the private repo's GHCR registry
+          echo "IMAGE_NAME=luiz-frias/semantic-code-agents-rs-onnx" >> "$GITHUB_ENV"
+
+          SLUG="$MODEL_SLUG"
+          SLUG_SAFE=$(echo "$SLUG" | tr '/' '-')
+          TAG=$(printf '%s' "$SLUG_SAFE" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "slug=$SLUG"
+            echo "slug_safe=$SLUG_SAFE"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+
+      # Login to Docker Hub (required for Build Cloud)
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      # Login to GHCR (for pushing the image)
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Docker Build Cloud setup
+      - name: Set up Docker Buildx (Build Cloud)
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: "lab:latest"
+          driver: cloud
+          endpoint: ${{ env.BUILDX_ENDPOINT }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GHCR_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # All branches: model slug tag (rolling)
+            type=raw,value=${{ steps.model.outputs.tag }}
+            # All branches: slug + SHA for traceability
+            type=raw,value=${{ steps.model.outputs.tag }}-${{ github.sha }}
+            # main branch: latest tag (production-ready)
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # dev branch: slug-dev tag (development baseline)
+            type=raw,value=${{ steps.model.outputs.tag }}-dev,enable=${{ github.ref == 'refs/heads/dev' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .github/ci/Dockerfile.onnx
+          target: onnx
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            MODEL_SLUG=${{ steps.model.outputs.slug }}
+          # Docker Build Cloud can't push to GHCR (no GITHUB_TOKEN access).
+          # For PRs: cache only. For pushes: load locally, then push from runner.
+          load: ${{ github.event_name != 'pull_request' }}
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || '' }}
+          provenance: false
+
+      - name: Push to GHCR
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # Push each tag from the locally loaded image
+          echo "$TAGS" | while IFS= read -r tag; do
+            [ -n "$tag" ] && echo "Pushing $tag..." && docker push "$tag"
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "## 📦 ONNX Model Image Built (Build Cloud)"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Model | \`${{ steps.model.outputs.slug }}\` |"
+            echo "| Tag | \`${{ steps.model.outputs.tag }}\` |"
+            echo "| Builder | \`${{ env.BUILDX_ENDPOINT }}\` |"
+            echo "| Image | \`${{ env.GHCR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.model.outputs.tag }}\` |"
+            echo ""
+            echo "### 🔍 Change Detection"
+            echo "| Category | Changed |"
+            echo "|----------|---------|"
+            echo "| Download script | ${{ needs.changes.outputs.script }} |"
+            echo "| Dockerfile | ${{ needs.changes.outputs.dockerfile }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,19 @@
+[package]
+name = "semantic-code-ports"
+description = "Port traits for the semantic-code-agents hexagonal architecture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+semantic-code-domain.workspace = true
+semantic-code-shared.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]

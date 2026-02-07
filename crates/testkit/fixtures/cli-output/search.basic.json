@@ -1,0 +1,17 @@
+{
+  "results": [
+    {
+      "content": "pub fn local_index_target() -> &'static str {\n    \"local-index\"\n}\n",
+      "key": {
+        "relativePath": "src/lib.rs",
+        "span": {
+          "endLine": 3,
+          "startLine": 1
+        }
+      },
+      "language": "rust",
+      "score": 0.7842438817024231
+    }
+  ],
+  "status": "ok"
+}

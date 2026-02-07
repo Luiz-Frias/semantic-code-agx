@@ -1,0 +1,22 @@
+[package]
+name = "semantic-code-vector"
+description = "Vector indexing kernel and APIs for semantic-code-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+experimental = []
+
+[dependencies]
+hnsw_rs.workspace = true
+semantic-code-shared.workspace = true
+serde.workspace = true
+
+[dev-dependencies]

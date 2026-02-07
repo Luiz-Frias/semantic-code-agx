@@ -1,0 +1,22 @@
+class SemanticCode < Formula
+  desc "Semantic code search engine powered by embeddings"
+  homepage "https://github.com/Luiz-Frias/semantic-code-agx"
+  license any_of: ["Apache-2.0", "MIT"]
+  version "{{version}}"
+
+  on_macos do
+    url "https://github.com/Luiz-Frias/semantic-code-agx/releases/download/v{{version}}/sca-{{version}}-aarch64-apple-darwin.tar.gz"
+    sha256 "{{sha256_macos_arm64}}"
+  end
+
+  on_linux do
+    url "https://github.com/Luiz-Frias/semantic-code-agx/releases/download/v{{version}}/sca-{{version}}-x86_64-unknown-linux-gnu.tar.gz"
+    sha256 "{{sha256_linux_x86_64}}"
+  end
+
+  def install
+    bin.install "sca"
+    bin.install_symlink "sca" => "semantic-code"
+  end
+
+end

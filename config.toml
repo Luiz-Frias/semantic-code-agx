@@ -1,0 +1,108 @@
+# ============================
+# Codex CLI Comprehensive Config
+# ============================
+
+# ---- Model selection ----
+model = "gpt-5.2-codex"
+model_provider = "openai"
+approval_policy = "on-request" # could also be: "untrusted", "on-request", "never"
+
+# ---- Model tuning ----
+model_context_window = 900000
+model_max_output_tokens = 275000
+model_reasoning_effort = "xhigh"          # minimal/low/medium/high
+model_reasoning_summary = "detailed"      # auto/concise/detailed/none
+model_verbosity = "high"                  # low/medium/high (GPT-5/Responses API)
+model_supports_reasoning_summaries = true
+
+# ---- Sandbox & security ----
+sandbox_mode = "danger-full-access" # or read-only/workspace-write
+
+[sandbox_workspace_write]
+# Extra configuration only if using workspace-write
+writable_roots = ["/Users/luizfrias/.pyenv/shims"]
+exclude_tmpdir_env_var = false
+exclude_slash_tmp = false
+network_access = true
+
+# ---- Feature Gates ----
+[features]
+collaboration_modes = true
+
+# ---- MCP servers ----
+
+[mcp_servers.Context7]
+command = "npx"
+args = ["--yes", "@upstash/context7-mcp@latest"]
+user_agent = "Codex CLI"
+timeout = 20000
+
+# ---- Model providers (custom providers go here) ----
+# Add custom/third-party providers if needed
+#[model_providers.openai-chat-completions]
+#name = "OpenAI using Chat Completions"
+#base_url = "https://api.openai.com/v1"
+#env_key = "OPENAI_API_KEY"
+#wire_api = "chat"
+
+#[model_providers.ollama]
+# name = "Ollama"
+# base_url = "http://localhost:11434/v1"
+
+# ---- History file ----
+[history]
+persistence = "save-all" # or "none"
+# max_bytes = 10485760    # currently ignored
+
+# ---- Profiles (Scoped config blocks for different use cases) ----
+[profiles.fast-light]
+model = "gpt-5-nano"
+model_provider = "openai"
+approval_policy = "never"
+model_reasoning_effort = "low"
+model_reasoning_summary = "concise"
+
+[profiles.zdr]
+model = "gpt-5.2-codex"
+model_provider = "openai"
+approval_policy = "on-request"
+model_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
+
+# ---- Environment security for subprocesses ----
+[shell_environment_policy]
+inherit = "core"                        # all/core/none
+ignore_default_excludes = false
+exclude = ["AWS_*", "AZURE_*"]
+include_only = ["PATH", "HOME", "USER"]
+set = { CI = "1" }
+
+# ---- Notifications (external, Python example script) ----
+#notify = ["python3", "/Users/mbolin/.codex/notify.py"]
+
+# ---- Misc options ----
+file_opener = "cursor"          # or "vscode", "none", etc.
+hide_agent_reasoning = false
+show_raw_agent_reasoning = true
+# project_doc_max_bytes = 32768
+preferred_auth_method = "chatgpt" # or "apikey"
+
+[tools]
+web_search = true
+view_image = true
+
+[tui]
+# Send desktop notifications when approvals are required or a turn completes.
+# You can optionally filter to specific notification types.
+# Available types are "agent-turn-complete" and "approval-requested".
+# Set to `true` for all types, or specify a list for specific types only.
+notifications = ["agent-turn-complete", "approval-requested"]
+
+# Disable terminal animations (welcome screen, status shimmer, spinner).
+# Defaults to true.
+animations = true
+
+# ---- Experimental options and overrides ----
+#experimental_instructions_file = "/path/to/AGENTS.md"
+#experimental_resume = "/path/to/resume.jsonl"
+#disable_response_storage = false

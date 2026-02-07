@@ -1,0 +1,68 @@
+version = 1
+
+[core]
+timeoutMs = 30000
+maxConcurrency = 8
+maxChunkChars = 2500
+
+[core.retry]
+maxAttempts = 3
+baseDelayMs = 250
+maxDelayMs = 5000
+jitterRatioPct = 20
+
+[embedding]
+provider = "auto"
+timeoutMs = 60000
+batchSize = 32
+localFirst = false
+localOnly = false
+
+[embedding.onnx]
+downloadOnMissing = false
+sessionPoolSize = 1
+
+[embedding.cache]
+enabled = false
+maxEntries = 2048
+maxBytes = 134217728
+diskEnabled = false
+diskMaxBytes = 1073741824
+
+[vectorDb]
+provider = "milvus"
+address = "127.0.0.1:19530"
+ssl = false
+indexMode = "dense"
+timeoutMs = 60000
+indexTimeoutMs = 3600000
+batchSize = 128
+snapshotStorage = "project"
+
+[vectorDb.index.dense]
+indexType = "HNSW"
+metricType = "COSINE"
+params = { M = 16, efConstruction = 200 }
+
+[vectorDb.index.sparse]
+indexType = "SPARSE_INVERTED_INDEX"
+metricType = "BM25"
+params = {}
+
+[sync]
+allowedExtensions = [
+  "c",
+  "cpp",
+  "go",
+  "java",
+  "js",
+  "jsx",
+  "md",
+  "py",
+  "rs",
+  "ts",
+  "tsx",
+]
+ignorePatterns = [".git/", "node_modules/", "target/"]
+maxFiles = 250000
+maxFileSizeBytes = 2000000
