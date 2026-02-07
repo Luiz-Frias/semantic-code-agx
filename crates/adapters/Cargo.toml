@@ -1,0 +1,79 @@
+[package]
+name = "semantic-code-adapters"
+description = "Adapter implementations for semantic-code-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = [
+  "openai",
+  "gemini",
+  "ollama",
+  "voyage",
+  "onnx",
+  "milvus-rest",
+  "milvus-grpc",
+]
+openai = ["dep:reqwest"]
+gemini = ["dep:reqwest"]
+ollama = ["dep:reqwest"]
+voyage = ["dep:reqwest"]
+onnx = ["dep:ort", "dep:tokenizers"]
+milvus-rest = ["dep:reqwest"]
+milvus-grpc = ["dep:base64", "dep:bytes", "dep:prost", "dep:tonic"]
+cache-postgres = ["dep:sqlx", "sqlx/postgres"]
+cache-mysql = ["dep:sqlx", "sqlx/mysql"]
+cache-mssql = ["dep:tiberius", "dep:tokio-util", "dep:futures-util"]
+
+[dependencies]
+semantic-code-ports.workspace = true
+semantic-code-shared.workspace = true
+semantic-code-config.workspace = true
+semantic-code-vector.workspace = true
+semantic-code-domain.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+md5.workspace = true
+sha2.workspace = true
+tree-sitter.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+reqwest = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
+rusqlite.workspace = true
+sqlx = { workspace = true, optional = true }
+tiberius = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+[dev-dependencies]
+wiremock.workspace = true
+
+[[bench]]
+name = "splitter"
+path = "benches/splitter.rs"
+harness = false
+
+[[bench]]
+name = "embedding"
+path = "benches/embedding.rs"
+harness = false

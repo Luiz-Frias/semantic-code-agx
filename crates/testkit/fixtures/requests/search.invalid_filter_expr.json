@@ -1,0 +1,5 @@
+{
+  "codebaseRoot": "/tmp/example-codebase",
+  "query": "hello",
+  "filterExpr": "score > 0.5"
+}

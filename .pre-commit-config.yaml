@@ -1,0 +1,254 @@
+# =============================================================================
+# RESEARCH-GRADE PRE-COMMIT CONFIGURATION (2025-02)
+# =============================================================================
+# Hardened quality gates covering Python, Rust, C++, and Bash code paths.
+# Uses published hook repositories + local hooks for GTest and bats testing.
+# Native language testing: pytest (Python), cargo (Rust), GTest (C++), bats (Bash)
+# =============================================================================
+
+minimum_pre_commit_version: "3.7.0"
+default_language_version:
+  python: python3 # Use venv's Python when activated, system Python otherwise
+default_install_hook_types:
+  - pre-commit
+  - pre-push
+  - commit-msg
+  - prepare-commit-msg
+default_stages:
+  - pre-commit
+fail_fast: true
+ci:
+  autofix_prs: true
+  autoupdate_schedule: monthly
+  skip: []
+exclude: |
+  (?x)^(
+    \.git/|
+    \.venv/|
+    \.pytest_cache/|
+    __pycache__/|
+    \.mypy_cache/|
+    \.ruff_cache/|
+    \.coverage|
+    htmlcov/|
+    \.next/|
+    node_modules/|
+    dist/|
+    build/|
+    \.egg-info/|
+    \.tox/|
+    \.nox/|
+    \.hypothesis/|
+    \.benchmarks/|
+    \.gitattributes|
+    \.gitignore|
+    \.dockerignore|
+    \.env.*|
+    \.secrets|
+    \.sops.*|
+    \.gitleaks\.toml|
+    \.gitmessage|
+    CHANGELOG\.md|
+    LICENSE.*|
+    \.cursor/|
+    \.vscode/|
+    \.idea/|
+    \.DS_Store|
+    mlruns/|
+    artifacts/|
+    volumes/
+  )
+
+repos:
+  # =============================================================================
+  # SECURITY & SECRETS
+  # =============================================================================
+
+  - repo: https://github.com/returntocorp/semgrep
+    rev: v1.150.0
+    hooks:
+      - id: semgrep
+        name: semgrep (policy)
+        stages: [pre-push]
+        args:
+          - "--config"
+          - "p/ci"
+          - "--error"
+          - "--timeout"
+          - "120"
+
+  # =============================================================================
+  # GENERAL HYGIENE
+  # =============================================================================
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ["--unsafe"]
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-shebang-scripts-are-executable
+      - id: check-executables-have-shebangs
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: debug-statements
+      - id: check-ast
+      - id: check-builtin-literals
+      - id: forbid-new-submodules
+
+  - repo: https://github.com/jumanjihouse/pre-commit-hooks
+    rev: 3.0.0
+    hooks:
+      - id: shellcheck
+      - id: shfmt
+        args: ["-i", "2", "-ci"]
+
+  # =============================================================================
+  # RUST QUALITY & TESTING
+  # =============================================================================
+  # Quality gates aligned with Phase 01 Milestone 3 of the migration plan.
+  # See: docs/plans/pending/rust_new_repo_cli_migration.plan.md
+  # -----------------------------------------------------------------------------
+
+  # TOML formatting (Cargo.toml, rustfmt.toml, clippy.toml, deny.toml)
+  # Using ComPWA mirror which provides proper pre-commit hooks
+  - repo: https://github.com/ComPWA/taplo-pre-commit
+    rev: v0.9.3
+    hooks:
+      - id: taplo-format
+        name: taplo (TOML format)
+        stages: [pre-commit]
+
+  - repo: https://github.com/AndrejOrsula/pre-commit-cargo
+    rev: 0.5.0
+    hooks:
+      # ─────────────────────────────────────────────────────────────────────────
+      # PRE-COMMIT: Fast checks that run on every commit
+      # ─────────────────────────────────────────────────────────────────────────
+      - id: cargo-fmt
+        name: cargo fmt (format)
+        stages: [pre-commit]
+        args: ["--all"]
+
+      # NOTE: cargo-check removed — clippy already performs type checking
+      # Having both caused lock contention and duplicate work
+
+      - id: cargo-clippy
+        name: cargo clippy (production - no allows)
+        stages: [pre-commit]
+        require_serial: true # Prevent parallel execution with nextest
+        args:
+          [
+            "--workspace",
+            "--lib",
+            "--bins",
+            "--exclude",
+            "semantic-code-testkit",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-D",
+            "clippy::unwrap_used",
+            "-D",
+            "clippy::expect_used",
+            "-D",
+            "clippy::panic",
+            "-D",
+            "clippy::allow_attributes",
+            "-W",
+            "clippy::await_holding_lock",
+            "-W",
+            "clippy::dbg_macro",
+            "-W",
+            "clippy::todo",
+            "-W",
+            "clippy::unimplemented",
+            "-D",
+            "unused_must_use",
+          ]
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # PRE-PUSH: Security checks (tests moved to local hooks for nextest)
+      # ─────────────────────────────────────────────────────────────────────────
+
+      - id: cargo-deny-check
+        name: cargo deny (advisories + licenses)
+        stages: [pre-push]
+
+  # Security audit for known vulnerabilities
+  - repo: local
+    hooks:
+      - id: cargo-audit
+        name: cargo audit (CVE scan)
+        entry: cargo audit --db .cargo/advisory-db
+        language: system
+        stages: [pre-push]
+        files: Cargo\.(toml|lock)$
+        pass_filenames: false
+
+      # Dead dependency detection
+      - id: cargo-machete
+        name: cargo machete (unused deps)
+        entry: cargo machete --skip-target-dir
+        language: system
+        stages: [pre-push]
+        files: Cargo\.toml$
+        pass_filenames: false
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # TESTING: Using cargo-nextest for speed + lower memory usage
+      # ─────────────────────────────────────────────────────────────────────────
+      - id: cargo-nextest-unit
+        name: cargo nextest (unit)
+        entry: cargo nextest run --workspace --lib --all-features
+        language: system
+        stages: [pre-commit]
+        files: \.(rs|toml)$
+        pass_filenames: false
+        require_serial: true # Prevent parallel execution with other cargo hooks
+
+      - id: cargo-nextest-all
+        name: cargo nextest (all)
+        entry: cargo nextest run --workspace --all-targets --all-features
+        language: system
+        stages: [pre-push]
+        files: \.(rs|toml)$
+        pass_filenames: false
+
+      - id: cargo-test-doc
+        name: cargo test (doc)
+        entry: cargo test --workspace --doc --all-features
+        language: system
+        stages: [pre-push]
+        files: \.(rs|toml)$
+        pass_filenames: false
+
+  - repo: https://github.com/aRustyDev/pre-commit-hooks
+    rev: v0.3.1
+    hooks:
+      - id: cargo-bench
+        name: cargo bench (performance regression)
+        stages: [pre-push]
+        args: ["--all-features"]
+
+  # =============================================================================
+  # CONTAINERS
+  # =============================================================================
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.14.0
+    hooks:
+      - id: hadolint-docker
+        args: ["--ignore", "DL3008", "--ignore", "DL3013", "--ignore", "DL3009"]
+
+  - repo: https://github.com/pryorda/dockerfilelint-precommit-hooks
+    rev: v0.1.0 # pragma: allowlist secret
+    hooks:
+      - id: dockerfilelint
+        files: Dockerfile.*$

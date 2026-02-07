@@ -1,0 +1,318 @@
+# =============================================================================
+# CI Workflow - Orchestrator
+# =============================================================================
+# Orchestrates the full CI pipeline:
+#   1. Detect path changes
+#   2. Build images if needed (onnx-models → ci-image)
+#   3. Run quality gates
+#
+# Called workflows:
+#   - onnx-models.yml: Builds ONNX model image (when model paths change)
+#   - ci-image.yml: Builds CI toolchain image (when toolchain paths change)
+#
+# Image pull strategy (fallback chains):
+#   - main:    nightly → fail
+#   - staging: staging → nightly → fail
+#   - dev:     nightly-dev → nightly → fail
+#   - other:   nightly-dev → nightly → fail
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - dev
+      - feature/**
+  pull_request:
+    branches:
+      - main
+      - staging
+      - dev
+
+permissions:
+  contents: read
+  packages: write # Needed for image builds
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ===========================================================================
+  # Job 1: Detect what changed
+  # ===========================================================================
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      ci-image: ${{ steps.filter.outputs.ci-image }}
+      onnx-models: ${{ steps.filter.outputs.onnx-models }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Fetch enough history to find merge-base on first push
+          fetch-depth: 100
+
+      - name: Determine comparison base
+        id: get-base
+        run: |
+          BEFORE="${{ github.event.before }}"
+          NULL_SHA="0000000000000000000000000000000000000000"
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # PR: use default behavior (compare against base branch)
+            echo "base=" >> "$GITHUB_OUTPUT"
+            echo "→ PR mode: comparing against base branch"
+
+          elif [[ "$BEFORE" == "$NULL_SHA" ]] || [[ -z "$BEFORE" ]]; then
+            # First push to branch: find merge-base with closest trunk
+            echo "→ First push detected, finding merge-base..."
+
+            # Fetch trunk branches for comparison
+            git fetch origin main:refs/remotes/origin/main --depth=100 2>/dev/null || true
+            git fetch origin dev:refs/remotes/origin/dev --depth=100 2>/dev/null || true
+            git fetch origin staging:refs/remotes/origin/staging --depth=100 2>/dev/null || true
+
+            # Find merge-base with each trunk, pick the closest (most recent)
+            BEST_BASE=""
+            BEST_DISTANCE=999999
+
+            for trunk in main dev staging; do
+              if MERGE_BASE=$(git merge-base HEAD "origin/$trunk" 2>/dev/null); then
+                DISTANCE=$(git rev-list --count "$MERGE_BASE"..HEAD 2>/dev/null || echo 999999)
+                echo "  $trunk: merge-base=$MERGE_BASE, distance=$DISTANCE"
+                if [[ "$DISTANCE" -lt "$BEST_DISTANCE" ]]; then
+                  BEST_BASE="$MERGE_BASE"
+                  BEST_DISTANCE="$DISTANCE"
+                fi
+              fi
+            done
+
+            if [[ -n "$BEST_BASE" ]]; then
+              echo "base=$BEST_BASE" >> "$GITHUB_OUTPUT"
+              echo "→ Using merge-base: $BEST_BASE (distance: $BEST_DISTANCE commits)"
+            else
+              echo "base=" >> "$GITHUB_OUTPUT"
+              echo "→ No merge-base found, using default (full diff)"
+            fi
+
+          else
+            # Normal push: compare against previous commit
+            echo "base=$BEFORE" >> "$GITHUB_OUTPUT"
+            echo "→ Normal push: comparing against $BEFORE"
+          fi
+
+      - name: Detect changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          base: ${{ steps.get-base.outputs.base }}
+          filters: |
+            ci-image:
+              - '.github/ci/Dockerfile'
+              - '.github/ci/mise.ci.toml'
+              - '.github/docker-compose.ci.yml'
+              - 'scripts/ci/**'
+              - 'mise.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rustfmt.toml'
+              - 'clippy.toml'
+              - 'deny.toml'
+              - '.pre-commit-config.yaml'
+              - 'justfile'
+              - '.github/workflows/ci-image.yml'
+            onnx-models:
+              - 'scripts/ci/ensure_onnx_assets.sh'
+              - '.github/ci/Dockerfile.onnx'
+              - '.github/workflows/onnx-models.yml'
+
+  # ===========================================================================
+  # Job 2: Build ONNX models image (if paths changed)
+  # ===========================================================================
+  onnx-models:
+    name: Build ONNX Image
+    needs: changes
+    if: needs.changes.outputs.onnx-models == 'true'
+    uses: ./.github/workflows/onnx-models.yml
+    secrets:
+      DOCKER_PAT: ${{ secrets.DOCKER_PAT }}
+
+  # ===========================================================================
+  # Job 3: Build CI image (if paths changed)
+  # Runs after onnx-models because CI image COPYs from ONNX image
+  # ===========================================================================
+  ci-image:
+    name: Build CI Image
+    needs: [changes, onnx-models]
+    # Run if ci-image paths changed, regardless of onnx-models outcome
+    if: always() && needs.changes.outputs.ci-image == 'true'
+    uses: ./.github/workflows/ci-image.yml
+    secrets:
+      DOCKER_PAT: ${{ secrets.DOCKER_PAT }}
+
+  # ===========================================================================
+  # Job 4: Run quality gates (always runs after optional builds complete)
+  # ===========================================================================
+  gates:
+    name: Quality Gates
+    needs: [changes, onnx-models, ci-image]
+    # Always run gates, even if builds were skipped or failed
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Determine CI image tags (branch-aware fallback chain)
+        id: ci-tag
+        run: |
+          REF="${GITHUB_REF#refs/heads/}"
+          # CI images are hosted on the private repo's GHCR registry
+          BASE_IMAGE="ghcr.io/luiz-frias/semantic-code-agents-rs-ci"
+          BASE_ONNX="ghcr.io/luiz-frias/semantic-code-agents-rs-onnx"
+
+          # Determine primary tag and fallback chain based on branch
+          case "$REF" in
+            main)
+              PRIMARY_TAG="nightly"
+              FALLBACK_TAGS=""
+              ONNX_PRIMARY="xenova-all-minilm-l6-v2"
+              ONNX_FALLBACK=""
+              ;;
+            staging)
+              PRIMARY_TAG="staging"
+              FALLBACK_TAGS="nightly"
+              ONNX_PRIMARY="xenova-all-minilm-l6-v2"
+              ONNX_FALLBACK=""
+              ;;
+            dev)
+              PRIMARY_TAG="nightly-dev"
+              FALLBACK_TAGS="nightly"
+              ONNX_PRIMARY="xenova-all-minilm-l6-v2-dev"
+              ONNX_FALLBACK="xenova-all-minilm-l6-v2"
+              ;;
+            *)
+              # feature/*, etc: nightly-dev → nightly
+              PRIMARY_TAG="nightly-dev"
+              FALLBACK_TAGS="nightly"
+              ONNX_PRIMARY="xenova-all-minilm-l6-v2-dev"
+              ONNX_FALLBACK="xenova-all-minilm-l6-v2"
+              ;;
+          esac
+
+          {
+            echo "base_image=$BASE_IMAGE"
+            echo "base_onnx=$BASE_ONNX"
+            echo "primary_tag=$PRIMARY_TAG"
+            echo "fallback_tags=$FALLBACK_TAGS"
+            echo "onnx_primary=$ONNX_PRIMARY"
+            echo "onnx_fallback=$ONNX_FALLBACK"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Pull CI image (with fallback chain)
+        env:
+          BASE_IMAGE: ${{ steps.ci-tag.outputs.base_image }}
+          PRIMARY_TAG: ${{ steps.ci-tag.outputs.primary_tag }}
+          FALLBACK_TAGS: ${{ steps.ci-tag.outputs.fallback_tags }}
+        run: |
+          pull_image() {
+            local tag="$1"
+            echo "Trying ${BASE_IMAGE}:${tag}..."
+            if docker pull "${BASE_IMAGE}:${tag}" 2>&1; then
+              echo "CI_IMAGE=${BASE_IMAGE}:${tag}" >> "$GITHUB_ENV"
+              return 0
+            fi
+            return 1
+          }
+
+          # Try primary tag first
+          if pull_image "$PRIMARY_TAG"; then
+            echo "✓ Using ${BASE_IMAGE}:${PRIMARY_TAG}"
+            exit 0
+          fi
+
+          # Try fallback tags in order
+          for tag in $FALLBACK_TAGS; do
+            if pull_image "$tag"; then
+              echo "✓ Fallback: using ${BASE_IMAGE}:${tag}"
+              exit 0
+            fi
+          done
+
+          # All tags failed - no local build, fail fast
+          echo "::error::No CI image found. Tried: ${PRIMARY_TAG} ${FALLBACK_TAGS}"
+          echo "::error::Run ci-image.yml workflow first, or check GHCR permissions."
+          exit 1
+
+      - name: Pull ONNX image (with fallback chain)
+        env:
+          BASE_ONNX: ${{ steps.ci-tag.outputs.base_onnx }}
+          ONNX_PRIMARY: ${{ steps.ci-tag.outputs.onnx_primary }}
+          ONNX_FALLBACK: ${{ steps.ci-tag.outputs.onnx_fallback }}
+        run: |
+          pull_onnx() {
+            local tag="$1"
+            echo "Trying ${BASE_ONNX}:${tag}..."
+            if docker pull "${BASE_ONNX}:${tag}" 2>&1; then
+              echo "ONNX_IMAGE=${BASE_ONNX}:${tag}" >> "$GITHUB_ENV"
+              return 0
+            fi
+            return 1
+          }
+
+          # Try primary tag first
+          if pull_onnx "$ONNX_PRIMARY"; then
+            echo "✓ Using ${BASE_ONNX}:${ONNX_PRIMARY}"
+            exit 0
+          fi
+
+          # Try fallback tags in order
+          for tag in $ONNX_FALLBACK; do
+            if pull_onnx "$tag"; then
+              echo "✓ Fallback: using ${BASE_ONNX}:${tag}"
+              exit 0
+            fi
+          done
+
+          # All tags failed
+          echo "::error::No ONNX image found. Tried: ${ONNX_PRIMARY} ${ONNX_FALLBACK}"
+          echo "::error::Run onnx-models.yml workflow first, or check GHCR permissions."
+          exit 1
+
+      - name: Start Milvus
+        run: docker compose -f .github/docker-compose.ci.yml up -d milvus-etcd milvus-minio milvus-standalone
+
+      - name: Wait for Milvus
+        run: |
+          echo "→ Waiting for Milvus to be ready..."
+          for i in {1..30}; do
+            if curl -s http://localhost:19530/v1/vector/collections >/dev/null 2>&1; then
+              echo "✓ Milvus ready"
+              break
+            fi
+            echo "  waiting... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run prek gates
+        run: COMPOSE_PROFILES=ci docker compose -f .github/docker-compose.ci.yml run --rm ci
+
+      - name: Shutdown services
+        if: always()
+        run: docker compose -f .github/docker-compose.ci.yml down -v

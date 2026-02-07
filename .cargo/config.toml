@@ -1,0 +1,136 @@
+# =============================================================================
+# CARGO CONFIGURATION
+# =============================================================================
+# Build settings and rustflags for the semantic-code-agx workspace.
+# Docs: https://doc.rust-lang.org/cargo/reference/config.html
+# =============================================================================
+
+# =============================================================================
+# BUILD SETTINGS
+# =============================================================================
+[build]
+# sccache is enabled via RUSTC_WRAPPER env var in mise.toml (local dev only)
+# CI uses mise.ci.toml which excludes sccache (Build Cloud handles caching)
+
+# Number of parallel jobs (omit for auto-detect based on CPU cores)
+# jobs = 8
+
+# Target directory (default: target/)
+# target-dir = "target"
+
+# =============================================================================
+# RUSTFLAGS - Compiler flags
+# =============================================================================
+[target.'cfg(all())']
+rustflags = [
+  # ─────────────────────────────────────────────────────────────────────────
+  # WARNINGS AS ERRORS
+  # ─────────────────────────────────────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────────────────
+  # UNSAFE CODE RESTRICTIONS
+  # ─────────────────────────────────────────────────────────────────────────
+  # Deny unsafe code by default (allow selectively in specific modules)
+  "-D",
+  "unsafe_code",
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # DOCUMENTATION
+  # ─────────────────────────────────────────────────────────────────────────
+  # Warn on missing docs for public items
+  "-W",
+  "missing_docs",
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # RUST 2024 EDITION COMPATIBILITY
+  # ─────────────────────────────────────────────────────────────────────────
+  # Enable future-incompatibility warnings
+  "-W",
+  "rust_2024_compatibility",
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # ADDITIONAL LINTS
+  # ─────────────────────────────────────────────────────────────────────────
+  "-W",
+  "trivial_casts",
+  "-W",
+  "trivial_numeric_casts",
+  "-W",
+  "unused_lifetimes",
+  "-W",
+  "unused_qualifications",
+]
+
+# =============================================================================
+# PROFILE-SPECIFIC FLAGS
+# =============================================================================
+# Development profile - faster builds, more debug info
+[profile.dev]
+# opt-level = 0  # No optimization (faster compilation)
+# debug = true   # Full debug info
+
+# Release profile - optimized builds
+[profile.release]
+# lto = true           # Link-time optimization (slower build, faster binary)
+# codegen-units = 1    # Single codegen unit (slower build, faster binary)
+# strip = true         # Strip symbols (smaller binary)
+
+# =============================================================================
+# ENVIRONMENT VARIABLES
+# =============================================================================
+[env]
+# Set RUST_BACKTRACE by default for development
+RUST_BACKTRACE = { value = "1", force = false }
+
+# =============================================================================
+# ALIASES - Convenience commands
+# =============================================================================
+[alias]
+# Quality gate commands
+b = "build"
+c = "check"
+t = "test"
+r = "run"
+cl = "clippy"
+
+# Watch commands (requires cargo-watch)
+w = "watch -x check"
+wt = "watch -x test"
+wr = "watch -x run"
+
+# Bacon alias (background checker with TUI)
+ba = "bacon"
+
+# Documentation
+d = "doc --no-deps --open"
+
+# =============================================================================
+# REGISTRY (crates.io)
+# =============================================================================
+[registries.crates-io]
+protocol = "sparse"
+
+# =============================================================================
+# NET SETTINGS
+# =============================================================================
+[net]
+# Retry failed network requests
+retry = 3
+# Use git CLI for fetching (more reliable on some systems)
+git-fetch-with-cli = true
+
+# =============================================================================
+# LINKING - Platform-specific linker optimization
+# =============================================================================
+# mold is Linux-only; macOS uses lld via clang's -fuse-ld flag
+
+# macOS uses the system linker (ld-prime); lld via -fuse-ld requires
+# LLVM's clang which isn't available on GH Actions macOS runners.
+# Local dev can override via CARGO_TARGET_*_LINKER env vars if desired.
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

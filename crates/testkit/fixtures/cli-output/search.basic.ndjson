@@ -1,0 +1,2 @@
+{"content":"pub fn local_index_target() -> &'static str {\n    \"local-index\"\n}\n","endLine":3,"relativePath":"src/lib.rs","score":0.7842438817024231,"startLine":1,"type":"result"}
+{"count":1,"status":"ok","type":"summary"}

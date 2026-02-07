@@ -1,0 +1,90 @@
+# mise.toml - semantic-code-agx
+# Unified version management + env vars
+# Docs: https://mise.jdx.dev/
+
+[env]
+# SOPS age key location (for encrypted secrets)
+SOPS_AGE_KEY_FILE = "{{env.HOME}}/.config/sops/age/keys.txt"
+
+# Auto-activate .venv when entering directory (mise uses uv to create it)
+# uv reads Python version from .python-version or pyproject.toml [project.requires-python]
+_.python.venv = { path = ".venv", create = true }
+
+# Rust compilation settings (migrated from .envrc)
+RUST_BACKTRACE = "1"
+CARGO_TERM_COLOR = "always"
+# sccache requires CARGO_INCREMENTAL=0 (they're mutually exclusive caching strategies)
+CARGO_INCREMENTAL = "0"
+# RUSTFLAGS are defined in .cargo/config.toml to keep a single source of truth.
+# Clippy lint policy for PRODUCTION code (kept in sync with justfile + pre-commit)
+# - allow_attributes: NO #[allow(clippy::*)] permitted in production
+# - Tests use separate run with allow_attributes_without_reason (requires reason)
+CLIPPY_FLAGS = "-D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::allow_attributes -W clippy::await_holding_lock -W clippy::dbg_macro -W clippy::todo -W clippy::unimplemented -D unused_must_use"
+# Test-specific clippy flags (allows with reason are OK)
+CLIPPY_FLAGS_TEST = "-D warnings -D clippy::allow_attributes_without_reason -W clippy::await_holding_lock -W clippy::dbg_macro"
+# sccache - caches compilation across branches (huge speedup)
+RUSTC_WRAPPER = "sccache"
+
+# Load secrets from .env (API keys, etc.)
+_.file = ".env"
+
+[settings.python]
+# Use uv for venv creation when uv.lock exists (no mise Python needed)
+uv_venv_auto = true
+
+[tools]
+# Rust nightly (edition 2024)
+rust = "nightly"
+just = "latest"
+# Native build tools for optional features (onnx/tokenizers/grpc)
+cmake = "latest"
+protoc = "latest"
+# prek (pre-commit-rs) - fast Rust-based pre-commit runner
+"github:j178/prek" = "latest"
+# sccache - shared compilation cache (speeds up branch switches)
+sccache = "latest"
+# bacon - background code checker with TUI
+"cargo:bacon" = "latest"
+# SOPS + age - encrypted secrets management
+sops = "latest"
+age = "latest"
+# uv - fast Python package manager (manages .venv)
+uv = "latest"
+# Shell script quality tools (for prek hooks)
+shellcheck = "latest" # Shell script linter
+shfmt = "latest"      # Shell script formatter
+bats = "latest"       # Bash automated testing
+# Linting tools (for prek hooks)
+hadolint = "latest"   # Dockerfile linter
+yamllint = "latest"   # YAML linter
+actionlint = "latest" # GitHub Actions workflow linter
+
+[tasks.check]
+description = "Run quality checks (fmt + clippy + test-unit)"
+run = "just check"
+
+[tasks.clippy]
+description = "Run clippy with repo lint policy (production + tests)"
+run = """
+cargo clippy --workspace --lib --bins --exclude semantic-code-testkit -- ${CLIPPY_FLAGS}
+cargo clippy --workspace --tests --benches --exclude semantic-code-testkit -- ${CLIPPY_FLAGS_TEST}
+"""
+
+[tasks.clippy-fix]
+description = "Run clippy with fixes enabled (production + tests)"
+run = """
+cargo clippy --workspace --lib --bins --exclude semantic-code-testkit --fix --allow-dirty -- ${CLIPPY_FLAGS}
+cargo clippy --workspace --tests --benches --exclude semantic-code-testkit --fix --allow-dirty -- ${CLIPPY_FLAGS_TEST}
+"""
+
+[tasks.test]
+description = "Run all tests"
+run = "just test-all"
+
+[tasks.gate]
+description = "Full pre-commit + pre-push gate"
+run = "just pc-full"
+
+[tasks.run]
+description = "Run the CLI"
+run = "just run"

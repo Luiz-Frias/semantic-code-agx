@@ -1,0 +1,19 @@
+[package]
+name = "semantic-code-shared"
+description = "Shared utilities, result types, and error handling for semantic-code-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]

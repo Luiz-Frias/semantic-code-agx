@@ -1,0 +1,24 @@
+[package]
+name = "semantic-code-domain"
+description = "Domain entities, primitives, and value objects for semantic-code-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates
+semantic-code-shared.workspace = true
+serde.workspace = true
+md5.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+# Property-based testing (Phase 02)
+proptest.workspace = true
+serde_json.workspace = true

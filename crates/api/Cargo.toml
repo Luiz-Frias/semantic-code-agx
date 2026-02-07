@@ -1,0 +1,23 @@
+[package]
+name = "semantic-code-api"
+description = "API DTOs and external contracts for semantic-code-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+semantic-code-domain.workspace = true
+semantic-code-shared.workspace = true
+semantic-code-validate-derive.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+semantic-code-testkit.workspace = true

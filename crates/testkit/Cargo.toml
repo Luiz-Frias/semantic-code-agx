@@ -1,0 +1,47 @@
+[package]
+name = "semantic-code-testkit"
+description = "Test helpers and in-memory adapters for semantic-code-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Testkit uses relaxed lints - test utilities can use unwrap/expect/panic safely
+# Cannot inherit workspace lints AND override, so we define our own minimal set
+[lints.rust]
+warnings = "warn" # Don't deny warnings in test utilities
+
+[lints.clippy]
+# Keep some basic quality lints
+pedantic = { level = "warn", priority = -1 }
+# But allow patterns that are safe in test code
+unwrap_used = "allow"
+expect_used = "allow"
+panic = "allow"
+indexing_slicing = "allow"
+missing_const_for_fn = "allow"
+significant_drop_tightening = "allow"
+redundant_clone = "allow"
+no_effect_underscore_binding = "allow"
+cast_precision_loss = "allow"
+derive_partial_eq_without_eq = "allow"
+match_wildcard_for_single_variants = "allow"
+default_constructed_unit_structs = "allow"
+unnecessary_map_or = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+map_unwrap_or = "allow"
+
+[dependencies]
+semantic-code-ports.workspace = true
+semantic-code-shared.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+semantic-code-domain.workspace = true

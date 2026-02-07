@@ -1,0 +1,236 @@
+# =============================================================================
+# GITIGNORE - semantic-code-agx
+# =============================================================================
+# Comprehensive ignore rules for Rust CLI project with hexagonal architecture.
+# Organized by category for maintainability.
+# =============================================================================
+
+# =============================================================================
+# RUST / CARGO
+# =============================================================================
+# Compilation artifacts
+/target/
+**/target/
+debug/
+/release/
+
+# Cargo lock is tracked for binaries, ignored for libraries
+# Since this is a CLI binary project, we TRACK Cargo.lock (do not ignore it)
+
+# Incremental compilation cache
+*.rmeta
+*.rlib
+*.d
+
+# Profiling data
+perf.data
+perf.data.old
+flamegraph.svg
+*.profraw
+*.profdata
+
+# Code coverage
+*.gcda
+*.gcno
+lcov.info
+tarpaulin-report.html
+coverage/
+lcov/
+
+# Cargo-generated files (not .cargo/config.toml which we track)
+.cargo/credentials
+.cargo/credentials.toml
+.cargo/.crates.toml
+.cargo/.crates2.json
+.cargo/bin/
+.cargo/git/
+.cargo/registry/
+
+# Rust analyzer
+rust-project.json
+
+# Cargo deny cache
+.cargo-deny-cache/
+
+# Cargo audit advisory database (repo-local override)
+.cargo/advisory-db/
+.cargo/advisory-db..lock
+
+# ONNX runtime cache (Phase 06 - feature-gated ONNX embeddings)
+.ort/
+*model.onnx
+!fixtures/**/*.onnx
+
+# =============================================================================
+# BUILD ARTIFACTS & BINARIES
+# =============================================================================
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.pdb
+
+# =============================================================================
+# PYTHON (for pre-commit, scripts)
+# =============================================================================
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+*.egg
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# =============================================================================
+# PRE-COMMIT
+# =============================================================================
+.pre-commit-cache/
+
+# =============================================================================
+# NODE (for any tooling scripts)
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.yarn/
+
+# =============================================================================
+# ENVIRONMENT & SECRETS
+# =============================================================================
+.env
+.env.*
+!.env.example
+!.env.enc
+.env.local
+.env.*.local
+secrets/
+*.pem
+*.key
+*.crt
+!fixtures/**/*.pem
+
+# Doppler (secret management)
+.doppler/
+
+# SOPS encrypted files are tracked, but plaintext versions are not
+*.decrypted
+*.plaintext
+
+# =============================================================================
+# IDE & EDITORS
+# =============================================================================
+# VS Code (settings.json is sometimes tracked for workspace config)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Vim/Neovim
+*.swp
+*.swo
+*.swn
+*~
+.netrwhist
+tags
+tags.lock
+tags.temp
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# =============================================================================
+# OS-SPECIFIC
+# =============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# =============================================================================
+# PROJECT-SPECIFIC
+# =============================================================================
+# Reference TypeScript implementation (read-only snapshot)
+references/
+
+# Docker volumes (local development data)
+volumes/
+
+# Local vector index data (.context/ is the project-local index)
+.context/
+
+# CI monitoring state (cached between runs)
+.ci-monitor-state/
+
+# Logging
+logs/
+*.log
+
+# Benchmarks output
+.benchmarks/
+criterion/
+
+# Test artifacts
+.tmp/
+tmp/
+
+# Documentation build output (mdBook, rustdoc)
+book/
+doc/
+target/doc/
+
+# =============================================================================
+# LEGACY (TypeScript migration remnants - can be removed after migration)
+# =============================================================================
+# These can be removed once the TypeScript reference is fully deprecated
+tsconfig.tsbuildinfo
+packages/
+dist/
+build/

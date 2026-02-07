@@ -1,0 +1,54 @@
+[package]
+name = "semantic-code-cli"
+description = "CLI binary for semantic-code-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sca"
+path = "src/main.rs"
+
+[[bin]]
+name = "semantic-code"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = ["milvus"]
+dev-tools = []
+milvus = ["milvus-grpc", "milvus-rest"]
+milvus-grpc = ["semantic-code-facade/milvus-grpc"]
+milvus-rest = ["semantic-code-facade/milvus-rest"]
+
+[dependencies]
+semantic-code-facade.workspace = true
+semantic-code-core.workspace = true
+semantic-code-config.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[[test]]
+name = "phase1_cli_smoke"
+path = "../../tests/e2e/phase1_cli_smoke.rs"
+
+[[test]]
+name = "phase3_config"
+path = "../../tests/e2e/phase3_config.rs"
+
+[[test]]
+name = "phase4_usecases"
+path = "../../tests/e2e/phase4_usecases.rs"
+
+[[test]]
+name = "phase5_cli_local"
+path = "../../tests/e2e/phase5_cli_local.rs"
+
+[[test]]
+name = "phase6_external"
+path = "../../tests/e2e/phase6_external.rs"

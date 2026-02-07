@@ -1,0 +1,80 @@
+# =============================================================================
+# Docker Compose CI - Reproducible CI environment
+# =============================================================================
+# Uses layered image architecture:
+#   - CI image: tools + compressed ONNX model
+#   - Model decompressed on first run via entrypoint
+#
+# Patterns:
+#   1. Pull pre-built: docker compose -f .github/docker-compose.ci.yml pull
+#   2. Build locally:  docker compose -f .github/docker-compose.ci.yml build
+#   3. Run gates:      COMPOSE_PROFILES=ci docker compose ... run --rm ci
+# =============================================================================
+
+name: semantic-code-ci
+
+include:
+  - path: ../docker-compose.yml
+
+x-ci-defaults: &ci-defaults
+  # Use CI_IMAGE and ONNX_IMAGE env vars set by ci.yml fallback chain
+  # Defaults here are for local development (docker compose up)
+  image: ${CI_IMAGE:-ghcr.io/luiz-frias/semantic-code-agents-rs-ci:nightly}
+  build:
+    context: ..
+    dockerfile: .github/ci/Dockerfile
+    target: ci
+    args:
+      # Use pre-built ONNX image (change tag to swap models)
+      ONNX_IMAGE: ${ONNX_IMAGE:-ghcr.io/luiz-frias/semantic-code-agents-rs-onnx:xenova-all-minilm-l6-v2}
+    # BuildKit cache for faster local rebuilds
+    cache_from:
+      - type=registry,ref=ghcr.io/luiz-frias/semantic-code-agents-rs-ci:cache
+  working_dir: /workspace
+  volumes:
+    - ..:/workspace
+    - /var/run/docker.sock:/var/run/docker.sock
+    # Named volume for decompressed model (persists across runs)
+    - onnx-models:/workspace/.context/models/onnx
+  environment:
+    CI: "true"
+    MISE_CONFIG_FILE: "/workspace/.github/ci/mise.ci.toml"
+    RUSTUP_TOOLCHAIN: "nightly"
+    CARGO_TERM_COLOR: "always"
+    # Disable sccache in CI (repo's mise.toml sets RUSTC_WRAPPER, but sccache isn't installed)
+    RUSTC_WRAPPER: ""
+    SCA_EMBEDDING_ONNX_MODEL_DIR: "/workspace/.context/models/onnx/Xenova-all-MiniLM-L6-v2"
+    GITHUB_REF_NAME: "${GITHUB_REF_NAME:-}"
+    # Propagate HF token if set (for private models)
+    HF_TOKEN: "${HF_TOKEN:-}"
+
+services:
+  ci:
+    <<: *ci-defaults
+    profiles: ["ci"]
+    network_mode: host
+    command: ["bash", "-lc", "scripts/ci/run-gates.sh"]
+    depends_on:
+      - milvus-standalone
+
+  # Interactive shell for debugging CI issues locally
+  ci-shell:
+    <<: *ci-defaults
+    profiles: ["debug"]
+    network_mode: host
+    stdin_open: true
+    tty: true
+    command: ["bash"]
+    depends_on:
+      - milvus-standalone
+
+  # Build-only target for pre-warming cache
+  ci-build:
+    <<: *ci-defaults
+    profiles: ["build"]
+    command: ["echo", "Build complete"]
+
+volumes:
+  onnx-models:
+    # Persists decompressed models across runs
+    name: semantic-code-onnx-models

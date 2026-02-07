@@ -1,0 +1,24 @@
+[package]
+name = "semantic-code-app"
+description = "Application use cases for semantic-code-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+semantic-code-ports.workspace = true
+semantic-code-domain.workspace = true
+semantic-code-shared.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+semantic-code-adapters.workspace = true
+semantic-code-config.workspace = true
+semantic-code-testkit.workspace = true
+tokio.workspace = true

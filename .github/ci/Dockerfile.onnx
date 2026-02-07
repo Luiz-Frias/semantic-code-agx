@@ -1,0 +1,82 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# ONNX Model Image - Swappable model layer for CI
+# =============================================================================
+# This image contains only the ONNX model assets, compressed with zstd.
+# It's built separately and rarely changes, allowing CI tooling image to
+# rebuild without re-downloading 90MB models.
+#
+# Usage:
+#   COPY --from=ghcr.io/.../onnx:minilm-v2 /models /workspace/.context/models
+#
+# Build args:
+#   MODEL_SLUG - HuggingFace model path (default: Xenova/all-MiniLM-L6-v2)
+#   HF_TOKEN   - Optional token for higher rate limits
+# =============================================================================
+
+FROM debian:bookworm-slim AS downloader
+
+ARG MODEL_SLUG="Xenova/all-MiniLM-L6-v2"
+ARG HF_TOKEN=""
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    zstd \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /models
+
+# Use bash with pipefail for proper error handling in pipes
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Download with optional auth token for higher rate limits
+# Note: Using file-based secret mount for BuildKit compatibility
+RUN --mount=type=secret,id=hf_token \
+    set -eux; \
+    SLUG_SAFE=$(echo "${MODEL_SLUG}" | tr '/' '-'); \
+    mkdir -p "${SLUG_SAFE}/onnx"; \
+    \
+    # Build auth header if token provided (ARG or secret file)
+    AUTH_HEADER=""; \
+    if [ -n "${HF_TOKEN:-}" ]; then \
+      AUTH_HEADER="Authorization: Bearer ${HF_TOKEN}"; \
+    elif [ -f /run/secrets/hf_token ]; then \
+      AUTH_HEADER="Authorization: Bearer $(cat /run/secrets/hf_token)"; \
+    fi; \
+    \
+    # Download tokenizer.json
+    curl -fL --retry 3 --retry-delay 5 \
+      ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
+      -o "${SLUG_SAFE}/tokenizer.json" \
+      "https://huggingface.co/${MODEL_SLUG}/raw/main/tokenizer.json"; \
+    \
+    # Download model.onnx (follows redirect to CDN)
+    curl -fL --retry 3 --retry-delay 5 \
+      ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
+      -o "${SLUG_SAFE}/onnx/model.onnx" \
+      "https://huggingface.co/${MODEL_SLUG}/resolve/main/onnx/model.onnx"; \
+    \
+    # Compress model with zstd (level 19 = high compression, ~60% size reduction)
+    zstd -19 --rm "${SLUG_SAFE}/onnx/model.onnx"; \
+    \
+    # Create manifest for verification
+    echo "MODEL_SLUG=${MODEL_SLUG}" > "${SLUG_SAFE}/manifest.txt"; \
+    echo "DOWNLOADED_AT=$(date -Iseconds)" >> "${SLUG_SAFE}/manifest.txt"; \
+    sha256sum "${SLUG_SAFE}/tokenizer.json" "${SLUG_SAFE}/onnx/model.onnx.zst" >> "${SLUG_SAFE}/manifest.txt"
+
+# Final minimal image with just the compressed assets
+FROM scratch AS onnx
+
+COPY --from=downloader /models /models
+
+# OCI labels for GHCR integration and discovery
+# IMPORTANT: org.opencontainers.image.source links the package to the repo,
+# granting GITHUB_TOKEN automatic write access in Actions workflows.
+LABEL org.opencontainers.image.source="https://github.com/Luiz-Frias/semantic-code-agx"
+LABEL org.opencontainers.image.title="ONNX Model Assets"
+LABEL org.opencontainers.image.description="Compressed ONNX model for semantic-code-agx CI"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL ai.huggingface.model.slug="${MODEL_SLUG:-Xenova/all-MiniLM-L6-v2}"
