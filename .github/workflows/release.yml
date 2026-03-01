@@ -165,7 +165,7 @@ jobs:
           python scripts/release/verify_archive.py --archive "${ARCHIVE}"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: sca-${{ matrix.target }}
           path: dist/*
