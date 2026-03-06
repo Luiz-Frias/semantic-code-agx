@@ -103,6 +103,11 @@ Provider-specific overrides (used by the adapter factory, not persisted in confi
 - `SCA_TELEMETRY_FORMAT` (`json`): enable JSON telemetry on stderr (defaults to log format)
 - `SCA_LOG_LEVEL` (`debug` | `info` | `warn` | `error`): minimum log level (default `info`)
 - `SCA_TRACE_SAMPLE_RATE` (`0.0` - `1.0`): span sampling rate (default `1.0`)
+- `RUST_LOG` (tracing env filter): infrastructure tracing filter; takes precedence over CLI `--log-level`
+
+CLI fallback when `RUST_LOG` is unset:
+
+- `--log-level` (`error` | `warn` | `info` | `debug` | `trace`): default tracing level for CLI runtime spans/events
 
 ## Secret redaction
 

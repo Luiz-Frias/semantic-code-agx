@@ -556,11 +556,9 @@ fn stage_from_phase(phase: &str) -> Box<str> {
 }
 
 fn job_progress_interval_ms(request: &JobRequest) -> InfraResult<u64> {
-    let env = semantic_code_config::BackendEnv::from_std_env().map_err(ErrorEnvelope::from)?;
-    let config = semantic_code_config::load_backend_config_from_path(
+    let config = semantic_code_config::load_backend_config_std_env(
         request.config_path.as_deref(),
         request.overrides_json.as_deref(),
-        &env,
     )?;
     Ok(config.embedding.jobs.progress_interval_ms)
 }

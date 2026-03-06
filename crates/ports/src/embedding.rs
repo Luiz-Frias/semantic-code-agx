@@ -208,8 +208,15 @@ pub trait EmbeddingPort: Send + Sync {
     ) -> BoxFuture<'_, Result<Vec<EmbeddingVector>>>;
 }
 
-/// Lending-style embedding port using GAT futures.
-pub trait EmbeddingPortLend: Send + Sync {
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Internal lending shim over [`EmbeddingPort`] using GAT futures.
+///
+/// This trait is intentionally sealed to preserve the blanket-impl bridge
+/// semantics between object-safe ports and lending call sites.
+pub trait EmbeddingPortLend: sealed::Sealed + Send + Sync {
     /// Future type returned by this port.
     type Future<'a, T>: Future<Output = Result<T>> + Send + 'a
     where
@@ -240,6 +247,8 @@ pub trait EmbeddingPortLend: Send + Sync {
         request: EmbedBatchRequest,
     ) -> Self::Future<'_, Vec<EmbeddingVector>>;
 }
+
+impl<T> sealed::Sealed for T where T: EmbeddingPort + ?Sized {}
 
 impl<T> EmbeddingPortLend for T
 where

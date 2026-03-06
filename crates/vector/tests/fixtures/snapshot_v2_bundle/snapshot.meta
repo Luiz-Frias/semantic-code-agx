@@ -1,0 +1,2 @@
+SCA-SNAPSHOT
+{"version":2,"dimension":3,"count":2,"params":{"maxNbConnection":16,"maxLayer":16,"efConstruction":200,"efSearch":50,"maxElements":100000},"quantization":{"scales":[1.0,1.0,1.0],"zeros":[0.0,0.0,0.0]},"vectorsCrc32":3250498693}

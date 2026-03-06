@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "dataType")]
 /// Schema field definition used by Milvus REST and gRPC builders.
-pub enum MilvusFieldSpec {
+pub(super) enum MilvusFieldSpec {
     /// Variable-length string field.
     #[serde(rename = "VarChar")]
     VarChar {
@@ -44,7 +44,7 @@ pub enum MilvusFieldSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Milvus server-side function definition (e.g., BM25).
-pub struct MilvusFunctionSpec {
+pub(super) struct MilvusFunctionSpec {
     /// Function type identifier.
     #[serde(rename = "type")]
     pub kind: Box<str>,
@@ -63,7 +63,7 @@ pub struct MilvusFunctionSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Collection schema definition for Milvus collections.
-pub struct MilvusSchemaSpec {
+pub(super) struct MilvusSchemaSpec {
     /// Field definitions for the collection.
     pub fields: Vec<MilvusFieldSpec>,
     /// Optional function definitions.
@@ -72,7 +72,7 @@ pub struct MilvusSchemaSpec {
 }
 
 /// Builds the dense-vector collection schema used by Milvus.
-pub fn build_dense_schema_spec(dimension: u32) -> MilvusSchemaSpec {
+pub(super) fn build_dense_schema_spec(dimension: u32) -> MilvusSchemaSpec {
     MilvusSchemaSpec {
         fields: vec![
             MilvusFieldSpec::VarChar {
@@ -121,7 +121,7 @@ pub fn build_dense_schema_spec(dimension: u32) -> MilvusSchemaSpec {
 }
 
 /// Builds the hybrid (dense + sparse) collection schema used by Milvus.
-pub fn build_hybrid_schema_spec(dimension: u32) -> MilvusSchemaSpec {
+pub(super) fn build_hybrid_schema_spec(dimension: u32) -> MilvusSchemaSpec {
     MilvusSchemaSpec {
         fields: vec![
             MilvusFieldSpec::VarChar {
@@ -181,7 +181,7 @@ pub fn build_hybrid_schema_spec(dimension: u32) -> MilvusSchemaSpec {
 
 #[cfg(feature = "milvus-grpc")]
 /// Converts a schema spec into a gRPC `CollectionSchema` payload.
-pub fn build_grpc_schema(
+pub(super) fn build_grpc_schema(
     spec: &MilvusSchemaSpec,
     collection_name: &str,
     description: &str,
@@ -379,7 +379,7 @@ fn build_grpc_functions(
 
 #[cfg(feature = "milvus-rest")]
 /// Converts a schema spec into a Milvus REST schema payload.
-pub fn build_rest_schema(spec: &MilvusSchemaSpec) -> serde_json::Value {
+pub(super) fn build_rest_schema(spec: &MilvusSchemaSpec) -> serde_json::Value {
     let fields = spec
         .fields
         .iter()

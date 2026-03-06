@@ -7,7 +7,7 @@ use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext,
 use std::sync::Arc;
 use std::time::Instant;
 
-pub struct InsertBatchTask {
+struct InsertBatchTask {
     request_ctx: RequestContext,
     vectordb: Arc<dyn VectorDbPort>,
     collection_name: semantic_code_domain::CollectionName,
@@ -18,7 +18,7 @@ pub struct InsertBatchTask {
 }
 
 impl InsertBatchTask {
-    pub(crate) fn new(ctx: &BatchContext<'_>, embedded: EmbeddedBatch) -> Self {
+    pub(super) fn new(ctx: &BatchContext<'_>, embedded: EmbeddedBatch) -> Self {
         Self {
             request_ctx: ctx.ctx.clone(),
             vectordb: Arc::clone(&ctx.deps.vectordb),
@@ -30,7 +30,7 @@ impl InsertBatchTask {
         }
     }
 
-    pub(crate) async fn run(self) -> Result<()> {
+    pub(super) async fn run(self) -> Result<()> {
         let Self {
             request_ctx,
             vectordb,
@@ -74,7 +74,7 @@ impl InsertBatchTask {
     }
 }
 
-pub fn schedule_insert_batch<'a>(
+pub(super) fn schedule_insert_batch<'a>(
     ctx: &BatchContext<'a>,
     state: &mut BatchState<'a>,
     embedded: EmbeddedBatch,
@@ -91,9 +91,15 @@ pub fn schedule_insert_batch<'a>(
     state.insert_tasks.push(InsertTask {
         promise: Some(Box::pin(promise)),
     });
+    tracing::debug!(
+        queued_insert_tasks = state.insert_tasks.len(),
+        next_insert_to_await = state.next_insert_to_await,
+        max_pending_insert_batches = ctx.max_pending_insert_batches,
+        "insert batch task queued"
+    );
 }
 
-pub async fn drain_insert_batches_for_backpressure<'a>(
+pub(super) async fn drain_insert_batches_for_backpressure<'a>(
     ctx: &BatchContext<'a>,
     state: &mut BatchState<'a>,
 ) -> Result<()> {
@@ -103,12 +109,18 @@ pub async fn drain_insert_batches_for_backpressure<'a>(
         .saturating_sub(state.next_insert_to_await)
         >= ctx.max_pending_insert_batches
     {
+        tracing::debug!(
+            queued_insert_tasks = state.insert_tasks.len(),
+            next_insert_to_await = state.next_insert_to_await,
+            max_pending_insert_batches = ctx.max_pending_insert_batches,
+            "insert backpressure triggered drain"
+        );
         drain_one_insert_batch(ctx, state).await?;
     }
     Ok(())
 }
 
-pub async fn drain_one_insert_batch<'a>(
+pub(super) async fn drain_one_insert_batch<'a>(
     ctx: &BatchContext<'a>,
     state: &mut BatchState<'a>,
 ) -> Result<()> {
@@ -116,17 +128,22 @@ pub async fn drain_one_insert_batch<'a>(
         return Ok(());
     }
 
-    let task = state
-        .insert_tasks
-        .get_mut(state.next_insert_to_await)
-        .ok_or_else(|| {
-            ErrorEnvelope::unexpected(
-                ErrorCode::internal(),
-                "missing insert task",
-                ErrorClass::NonRetriable,
-            )
-        })?;
+    let queued_insert_tasks = state.insert_tasks.len();
+    let task_index = state.next_insert_to_await;
     state.next_insert_to_await += 1;
+    tracing::debug!(
+        queued_insert_tasks = queued_insert_tasks,
+        next_insert_to_await = state.next_insert_to_await,
+        "draining insert batch"
+    );
+
+    let task = state.insert_tasks.get_mut(task_index).ok_or_else(|| {
+        ErrorEnvelope::unexpected(
+            ErrorCode::internal(),
+            "missing insert task",
+            ErrorClass::NonRetriable,
+        )
+    })?;
 
     let Some(promise) = task.promise.take() else {
         return Ok(());
@@ -142,11 +159,31 @@ pub async fn drain_one_insert_batch<'a>(
         if let Some(logger) = ctx.deps.logger.as_ref() {
             logger.error(
                 "index.insert_batch_failed",
-                "Failed to insert chunk batch; continuing",
+                "Failed to insert chunk batch; aborting",
                 None,
             );
         }
+        return Err(with_insert_failure_metadata(
+            error,
+            task_index,
+            queued_insert_tasks,
+            state.next_insert_to_await,
+        ));
     }
 
     Ok(())
+}
+
+fn with_insert_failure_metadata(
+    error: ErrorEnvelope,
+    task_index: usize,
+    queued_insert_tasks: usize,
+    next_insert_to_await: usize,
+) -> ErrorEnvelope {
+    error
+        .with_metadata("stage", "insert")
+        .with_metadata("operation", "index_codebase.insert_batch")
+        .with_metadata("insertTaskIndex", task_index.to_string())
+        .with_metadata("queuedInsertTasks", queued_insert_tasks.to_string())
+        .with_metadata("nextInsertToAwait", next_insert_to_await.to_string())
 }

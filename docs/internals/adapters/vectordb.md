@@ -23,6 +23,9 @@ This repository supports local vector storage and external Milvus adapters.
 - `timeoutMs`: request timeout.
 - `batchSize`: insert/delete batch size.
 - `snapshotStorage`: applies to local snapshots only.
+- `snapshotFormat`: local snapshot format (`v1` | `v2`).
+- `snapshotMaxBytes`: optional max bytes per local snapshot write.
+- `experimentalU8Search`: enable experimental local quantized search path.
 
 If both `address` and `baseUrl` are provided, `address` is used.
 
@@ -54,6 +57,9 @@ These flags are merged as config overrides for the current command only.
 - `SCA_VECTOR_DB_INDEX_MODE`
 - `SCA_VECTOR_DB_TIMEOUT_MS`
 - `SCA_VECTOR_DB_BATCH_SIZE`
+- `SCA_VECTOR_DB_SNAPSHOT_FORMAT`
+- `SCA_VECTOR_DB_SNAPSHOT_MAX_BYTES`
+- `SCA_VECTOR_DB_EXPERIMENTAL_U8_SEARCH`
 
 ## Notes
 

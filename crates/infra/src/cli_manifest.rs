@@ -36,7 +36,7 @@ pub struct CliManifest {
 
 impl CliManifest {
     /// Build a new manifest for a codebase.
-    pub fn new(
+    pub(crate) fn new(
         codebase_root: &Path,
         collection_name: impl AsRef<str>,
         index_mode: IndexMode,

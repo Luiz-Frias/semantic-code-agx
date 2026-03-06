@@ -15,4 +15,7 @@ pub mod voyage;
 #[cfg(feature = "onnx")]
 pub mod onnx;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+pub mod ane;
+
 pub mod fixed;

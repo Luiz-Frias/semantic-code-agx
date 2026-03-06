@@ -3,7 +3,7 @@
 use crate::error::{CliError, ExitCode};
 use crate::format::OutputMode;
 use crate::{CliOutput, format_error_output, infra_exit_code};
-use semantic_code_facade::{CliInitStatus, run_init_local};
+use semantic_code_facade::{CliInitStatus, SnapshotStorageMode, run_init_local};
 use std::path::Path;
 
 /// Run the init command.
@@ -11,7 +11,7 @@ pub fn run_init(
     mode: OutputMode,
     config_path: Option<&Path>,
     codebase_root: &Path,
-    storage_mode: Option<semantic_code_config::SnapshotStorageMode>,
+    storage_mode: Option<SnapshotStorageMode>,
     force: bool,
 ) -> Result<CliOutput, CliError> {
     let status = match run_init_local(config_path, codebase_root, storage_mode, force) {

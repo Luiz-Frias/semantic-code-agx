@@ -10,6 +10,14 @@ sca init [--config <path>] [--codebase-root <path>] \
   [--storage-mode disabled|project|custom:/abs/path] [--force]
 ```
 
+## estimate-storage
+
+```bash
+sca estimate-storage [--config <path>] [--codebase-root <path>]
+```
+
+Embedding and vector DB overrides match `index`.
+
 ## index
 
 ```bash
@@ -30,6 +38,7 @@ Embedding overrides (optional):
 Vector DB overrides (optional):
 
 - `--vector-db-provider <id>`
+- `--vector-kernel <hnsw-rs|dfrr|flat-scan>`
 - `--vector-db-address <host:port>`
 - `--vector-db-base-url <url>`
 - `--vector-db-database <name>`
@@ -45,9 +54,29 @@ sca search --query <text> [--top-k <n>] [--threshold <f>] \
   [--filter-expr <expr>] [--include-content] [--config <path>] [--codebase-root <path>]
 sca search --stdin [--top-k <n>] [--threshold <f>] \
   [--filter-expr <expr>] [--include-content] [--config <path>] [--codebase-root <path>]
+sca search --stdin-batch [--config <path>] [--codebase-root <path>]
 ```
 
 Vector DB overrides (optional): same as `index`.
+
+`--stdin-batch` expects one NDJSON query per stdin line and emits one NDJSON
+result per stdout line after loading the local index once.
+
+## calibrate
+
+```bash
+sca calibrate [--config <path>] [--codebase-root <path>] \
+  [--target-recall <f>] [--precision <f>] [--num-queries <n>] [--top-k <n>]
+```
+
+Vector DB overrides (optional): same as `index`.
+
+## snapshot-subset
+
+```bash
+sca snapshot-subset --source <snapshot-dir> --dest <snapshot-dir> \
+  --target-count <n> [--seed <u64>] [--noise-sigma <f>]
+```
 
 ## reindex
 

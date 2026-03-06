@@ -1,7 +1,7 @@
 //! Semantic search use-case (dense + hybrid).
 
 use semantic_code_domain::{
-    CollectionName, IndexMode, SearchResult, SearchResultKey, compare_search_results,
+    CollectionName, IndexMode, SearchResult, SearchResultKey, SearchStats, compare_search_results,
 };
 use semantic_code_ports::{
     EmbeddingPort, HybridSearchBatchRequest, HybridSearchData, HybridSearchOptions,
@@ -27,8 +27,20 @@ pub struct SemanticSearchInput {
     pub query: Box<str>,
     /// Optional top-k override (defaults to 5).
     pub top_k: Option<u32>,
-    /// Optional score threshold (defaults to 0.5 for dense).
+    /// Optional score threshold (defaults to 0.0 — no filtering).
     pub threshold: Option<f32>,
+    /// Pre-computed query embedding vector. When provided, embedding inference
+    /// is skipped and this vector is used directly for similarity search.
+    pub query_vector: Option<semantic_code_ports::EmbeddingVector>,
+}
+
+/// Semantic search output payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticSearchOutput {
+    /// Ordered search results.
+    pub results: Vec<SearchResult>,
+    /// Optional vector-search diagnostics.
+    pub stats: Option<SearchStats>,
 }
 
 /// Dependencies required by semantic search.
@@ -45,11 +57,22 @@ pub struct SemanticSearchDeps {
 }
 
 /// Execute semantic search for the given input.
+#[tracing::instrument(
+    name = "app.semantic_search",
+    skip_all,
+    fields(
+        collection = %input.collection_name.as_str(),
+        index_mode = %input.index_mode.as_str(),
+        query_len = input.query.len(),
+        top_k = input.top_k.unwrap_or(5),
+        has_threshold = input.threshold.is_some(),
+    )
+)]
 pub async fn semantic_search(
     ctx: &RequestContext,
     deps: &SemanticSearchDeps,
     input: SemanticSearchInput,
-) -> Result<Vec<SearchResult>> {
+) -> Result<SemanticSearchOutput> {
     let started_at = Instant::now();
     let total_tags = tags_index_mode(input.index_mode);
     let total_timer = deps
@@ -58,7 +81,7 @@ pub async fn semantic_search(
         .map(|telemetry| telemetry.start_timer("backend.search.total", Some(&total_tags)));
 
     let top_k = input.top_k.unwrap_or(5).max(1);
-    let threshold = input.threshold.unwrap_or(0.5);
+    let threshold = input.threshold.unwrap_or(0.0);
 
     if let Some(logger) = deps.logger.as_ref() {
         logger.info(
@@ -109,11 +132,26 @@ pub async fn semantic_search(
                     );
                 }
             }
+            tracing::warn!(
+                error = %error,
+                cancelled = error.is_cancelled(),
+                "semantic search failed"
+            );
             Err(error)
         },
     }
 }
 
+#[tracing::instrument(
+    name = "app.semantic_search.run",
+    skip_all,
+    fields(
+        collection = %input.collection_name.as_str(),
+        index_mode = %input.index_mode.as_str(),
+        top_k = top_k,
+        threshold = threshold,
+    )
+)]
 async fn run_search(
     ctx: &RequestContext,
     deps: &SemanticSearchDeps,
@@ -121,7 +159,7 @@ async fn run_search(
     top_k: u32,
     threshold: f32,
     started_at: Instant,
-) -> Result<Vec<SearchResult>> {
+) -> Result<SemanticSearchOutput> {
     ctx.ensure_not_cancelled("semantic_search.start")?;
 
     let has_collection = deps
@@ -129,13 +167,22 @@ async fn run_search(
         .has_collection(ctx, input.collection_name.clone())
         .await?;
     if !has_collection {
+        tracing::debug!("collection missing; returning empty search results");
         log_completed(deps, input, top_k, threshold, 0, started_at);
-        return Ok(Vec::new());
+        return Ok(SemanticSearchOutput {
+            results: Vec::new(),
+            stats: None,
+        });
     }
 
-    let embedding = embed_query(ctx, deps, input).await?;
-    let results = search_vectordb(ctx, deps, input, embedding, top_k, threshold).await?;
-    let ordered = rerank_results(deps, input, results);
+    let embedding = if let Some(vector) = input.query_vector.clone() {
+        tracing::debug!("using pre-computed query vector; skipping embedding inference");
+        vector
+    } else {
+        embed_query(ctx, deps, input).await?
+    };
+    let search_output = search_vectordb(ctx, deps, input, embedding, top_k, threshold).await?;
+    let ordered = rerank_results(deps, input, search_output.results);
 
     if let Some(telemetry) = deps.telemetry.as_ref() {
         telemetry.increment_counter(
@@ -146,10 +193,23 @@ async fn run_search(
     }
 
     log_completed(deps, input, top_k, threshold, ordered.len(), started_at);
+    tracing::debug!(result_count = ordered.len(), "semantic search completed");
 
-    Ok(ordered)
+    Ok(SemanticSearchOutput {
+        results: ordered,
+        stats: search_output.stats,
+    })
 }
 
+#[tracing::instrument(
+    name = "app.semantic_search.embed_query",
+    skip_all,
+    fields(
+        index_mode = %input.index_mode.as_str(),
+        provider = deps.embedding.provider().id.as_str(),
+        query_len = input.query.len(),
+    )
+)]
 async fn embed_query(
     ctx: &RequestContext,
     deps: &SemanticSearchDeps,
@@ -177,6 +237,17 @@ async fn embed_query(
     Ok(embedding)
 }
 
+#[tracing::instrument(
+    name = "app.semantic_search.search_vectordb",
+    skip_all,
+    fields(
+        collection = %input.collection_name.as_str(),
+        index_mode = %input.index_mode.as_str(),
+        provider = deps.vectordb.provider().id.as_str(),
+        top_k = top_k,
+        threshold = threshold,
+    )
+)]
 async fn search_vectordb(
     ctx: &RequestContext,
     deps: &SemanticSearchDeps,
@@ -184,7 +255,7 @@ async fn search_vectordb(
     embedding: semantic_code_ports::EmbeddingVector,
     top_k: u32,
     threshold: f32,
-) -> Result<Vec<SearchResult>> {
+) -> Result<SemanticSearchOutput> {
     ctx.ensure_not_cancelled("semantic_search.vectordb")?;
 
     let method = match input.index_mode {
@@ -202,10 +273,11 @@ async fn search_vectordb(
         .map(|telemetry| telemetry.start_timer("backend.search.vectordb", Some(&vectordb_tags)));
 
     let vector = embedding.into_vector();
-    let results = match input.index_mode {
+    let output = match input.index_mode {
         IndexMode::Hybrid => {
             let requests = hybrid_requests(&vector, input.query.clone(), top_k);
-            deps.vectordb
+            let results = deps
+                .vectordb
                 .hybrid_search(
                     ctx,
                     HybridSearchBatchRequest {
@@ -217,35 +289,59 @@ async fn search_vectordb(
                 .await?
                 .into_iter()
                 .map(map_hybrid_result)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            SemanticSearchOutput {
+                results,
+                stats: None,
+            }
         },
-        IndexMode::Dense => deps
-            .vectordb
-            .search(
-                ctx,
-                VectorSearchRequest {
-                    collection_name: input.collection_name.clone(),
-                    query_vector: vector,
-                    options: VectorSearchOptions {
-                        top_k: Some(top_k),
-                        threshold: Some(threshold),
-                        filter_expr: None,
+        IndexMode::Dense => {
+            let response = deps
+                .vectordb
+                .search(
+                    ctx,
+                    VectorSearchRequest {
+                        collection_name: input.collection_name.clone(),
+                        query_vector: vector,
+                        options: VectorSearchOptions {
+                            top_k: Some(top_k),
+                            threshold: Some(threshold),
+                            filter_expr: None,
+                        },
                     },
-                },
-            )
-            .await?
-            .into_iter()
-            .map(map_vector_result)
-            .collect::<Vec<_>>(),
+                )
+                .await?;
+            SemanticSearchOutput {
+                results: response
+                    .results
+                    .into_iter()
+                    .map(map_vector_result)
+                    .collect::<Vec<_>>(),
+                stats: response.stats,
+            }
+        },
     };
 
     if let Some(timer) = vectordb_timer.as_ref() {
         timer.stop();
     }
+    tracing::debug!(
+        result_count = output.results.len(),
+        method = method,
+        "vector search completed"
+    );
 
-    Ok(results)
+    Ok(output)
 }
 
+#[tracing::instrument(
+    name = "app.semantic_search.rerank",
+    skip_all,
+    fields(
+        index_mode = %input.index_mode.as_str(),
+        initial_results = results.len(),
+    )
+)]
 fn rerank_results(
     deps: &SemanticSearchDeps,
     input: &SemanticSearchInput,
@@ -262,6 +358,7 @@ fn rerank_results(
     if let Some(timer) = rerank_timer.as_ref() {
         timer.stop();
     }
+    tracing::debug!(result_count = results.len(), "rerank completed");
 
     results
 }
@@ -455,11 +552,13 @@ fn map_hybrid_result(result: semantic_code_ports::HybridSearchResult) -> SearchR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use semantic_code_domain::{EmbeddingProviderId, Language, LineSpan, VectorDbProviderId};
+    use semantic_code_domain::{
+        EmbeddingProviderId, Language, LineSpan, SearchStats, VectorDbProviderId,
+    };
     use semantic_code_ports::{
         DetectDimensionRequest, EmbedBatchRequest, EmbedRequest, EmbeddingProviderInfo,
         EmbeddingVector, VectorDbProviderInfo, VectorDocument, VectorDocumentMetadata,
-        VectorSearchResult,
+        VectorSearchResponse, VectorSearchResult,
     };
     use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, Result as SharedResult};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -537,7 +636,7 @@ mod tests {
     struct TestVectorDb {
         provider: VectorDbProviderInfo,
         has_collection: bool,
-        search_results: Vec<VectorSearchResult>,
+        search_response: VectorSearchResponse,
         hybrid_requests: Arc<Mutex<Vec<HybridSearchRequest>>>,
         hybrid_options: Arc<Mutex<Option<HybridSearchOptions>>>,
         search_calls: Arc<AtomicUsize>,
@@ -553,7 +652,10 @@ mod tests {
             Ok(Self {
                 provider,
                 has_collection: true,
-                search_results,
+                search_response: VectorSearchResponse {
+                    results: search_results,
+                    stats: None,
+                },
                 hybrid_requests: Arc::new(Mutex::new(Vec::new())),
                 hybrid_options: Arc::new(Mutex::new(None)),
                 search_calls: Arc::new(AtomicUsize::new(0)),
@@ -655,8 +757,8 @@ mod tests {
             &self,
             _ctx: &RequestContext,
             request: VectorSearchRequest,
-        ) -> semantic_code_ports::BoxFuture<'_, SharedResult<Vec<VectorSearchResult>>> {
-            let results = self.search_results.clone();
+        ) -> semantic_code_ports::BoxFuture<'_, SharedResult<VectorSearchResponse>> {
+            let response = self.search_response.clone();
             let last_search_options = self.last_search_options.clone();
             let calls = self.search_calls.clone();
             let VectorSearchRequest { options, .. } = request;
@@ -670,7 +772,7 @@ mod tests {
                     )
                 })?;
                 *guard = Some(options);
-                Ok(results)
+                Ok(response)
             })
         }
 
@@ -782,14 +884,17 @@ mod tests {
             query: "hello".into(),
             top_k: Some(10),
             threshold: Some(0.0),
+            query_vector: None,
         };
 
-        let results = semantic_search(&ctx, &deps, input).await?;
-        let ordered_paths: Vec<&str> = results
+        let output = semantic_search(&ctx, &deps, input).await?;
+        let ordered_paths: Vec<&str> = output
+            .results
             .iter()
             .map(|result| result.key.relative_path.as_ref())
             .collect();
         assert_eq!(ordered_paths, vec!["a.rs", "a.rs", "a.rs", "b.rs"]);
+        assert!(output.stats.is_none());
         Ok(())
     }
 
@@ -813,6 +918,7 @@ mod tests {
             query: "hello".into(),
             top_k: None,
             threshold: Some(0.7),
+            query_vector: None,
         };
 
         let _ = semantic_search(&ctx, &deps, input).await?;
@@ -849,6 +955,7 @@ mod tests {
             query: "hello".into(),
             top_k: None,
             threshold: None,
+            query_vector: None,
         };
 
         let result = semantic_search(&ctx, &deps, input).await;
@@ -878,9 +985,11 @@ mod tests {
             query: "hello".into(),
             top_k: Some(3),
             threshold: None,
+            query_vector: None,
         };
 
-        let _ = semantic_search(&ctx, &deps, input).await?;
+        let output = semantic_search(&ctx, &deps, input).await?;
+        assert!(output.stats.is_none());
         let requests = vectordb.take_hybrid_requests()?;
         assert_eq!(requests.len(), 2);
         let first = requests.get(0).ok_or_else(|| {
@@ -901,6 +1010,51 @@ mod tests {
         assert!(matches!(second.data, HybridSearchData::SparseQuery(_)));
         assert_eq!(first.anns_field.as_ref(), "vector");
         assert_eq!(second.anns_field.as_ref(), "sparse_vector");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dense_stats_are_forwarded() -> SharedResult<()> {
+        let mut vectordb = TestVectorDb::new(Vec::new())?;
+        vectordb.search_response.stats = Some(SearchStats {
+            expansions: Some(42),
+            kernel: "hnsw-rs".into(),
+            extra: BTreeMap::new(),
+            kernel_search_duration_ns: None,
+            index_size: None,
+        });
+        let vectordb = Arc::new(vectordb);
+        let embedding = Arc::new(TestEmbedding::new(vec![0.1, 0.2, 0.3])?);
+        let deps = SemanticSearchDeps {
+            embedding,
+            vectordb,
+            logger: None,
+            telemetry: None,
+        };
+
+        let ctx = RequestContext::new_request();
+        let input = SemanticSearchInput {
+            codebase_root: "/tmp".into(),
+            collection_name: CollectionName::parse("code_chunks_test")
+                .map_err(ErrorEnvelope::from)?,
+            index_mode: IndexMode::Dense,
+            query: "hello".into(),
+            top_k: Some(3),
+            threshold: Some(0.0),
+            query_vector: None,
+        };
+
+        let output = semantic_search(&ctx, &deps, input).await?;
+        assert_eq!(
+            output.stats,
+            Some(SearchStats {
+                expansions: Some(42),
+                kernel: "hnsw-rs".into(),
+                extra: BTreeMap::new(),
+                kernel_search_duration_ns: None,
+                index_size: None,
+            })
+        );
         Ok(())
     }
 }

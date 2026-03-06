@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "semantic-code"
-path = "src/main.rs"
+path = "src/bin/semantic-code.rs"
 
 [lints]
 workspace = true
@@ -25,17 +25,38 @@ dev-tools = []
 milvus = ["milvus-grpc", "milvus-rest"]
 milvus-grpc = ["semantic-code-facade/milvus-grpc"]
 milvus-rest = ["semantic-code-facade/milvus-rest"]
+experimental-dfrr-kernel = ["semantic-code-facade/experimental-dfrr-kernel"]
+ane = ["semantic-code-facade/ane"]
 
 [dependencies]
 semantic-code-facade.workspace = true
-semantic-code-core.workspace = true
-semantic-code-config.workspace = true
+semantic-code-shared.workspace = true
+semantic-code-vector.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+semantic-code-adapters.workspace = true
+semantic-code-config.workspace = true
+semantic-code-domain.workspace = true
+semantic-code-ports.workspace = true
+semantic-code-shared.workspace = true
+semantic-code-vector.workspace = true
+tokio.workspace = true
 
 [[test]]
 name = "phase1_cli_smoke"
 path = "../../tests/e2e/phase1_cli_smoke.rs"
+
+[[test]]
+name = "phase01_vector_snapshot"
+path = "../../tests/e2e/phase01_vector_snapshot.rs"
+
+[[test]]
+name = "phase02_localdb_snapshot_v2"
+path = "../../tests/e2e/phase02_localdb_snapshot_v2.rs"
 
 [[test]]
 name = "phase3_config"
@@ -52,3 +73,15 @@ path = "../../tests/e2e/phase5_cli_local.rs"
 [[test]]
 name = "phase6_external"
 path = "../../tests/e2e/phase6_external.rs"
+
+[[test]]
+name = "phase7_cli_flow"
+path = "../../tests/e2e/phase7_cli_flow.rs"
+
+[[test]]
+name = "phase7_observability"
+path = "../../tests/e2e/phase7_observability.rs"
+
+[[test]]
+name = "phase06_cli_kernel"
+path = "../../tests/e2e/phase06_cli_kernel.rs"

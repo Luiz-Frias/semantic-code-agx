@@ -2,7 +2,7 @@
 
 use semantic_code_shared::{ErrorCode, ErrorEnvelope, Result};
 
-pub fn to_milvus_rest_base_url(address: &str) -> Result<Box<str>> {
+pub(super) fn to_milvus_rest_base_url(address: &str) -> Result<Box<str>> {
     let trimmed = address.trim();
     if trimmed.is_empty() {
         return Err(ErrorEnvelope::expected(

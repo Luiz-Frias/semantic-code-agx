@@ -12,11 +12,29 @@ repository.workspace = true
 workspace = true
 
 [features]
+default = ["accelerate", "experimental-u8-search"]
+accelerate = []
 experimental = []
+experimental-u8-search = []
+# Retained as no-op for backward compatibility (DfrrKernel now lives in dfrr_hnsw crate).
+experimental-dfrr-kernel = []
 
 [dependencies]
 hnsw_rs.workspace = true
+crc32fast.workspace = true
+memmap2.workspace = true
 semantic-code-shared.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+libc.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
+
+[[bench]]
+name = "u8_search"
+path = "benches/u8_search.rs"
+harness = false

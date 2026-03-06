@@ -2,10 +2,12 @@
 
 use crate::InfraResult;
 use semantic_code_config::{
-    ValidatedClearIndexRequest, ValidatedIndexRequest, ValidatedReindexByChangeRequest,
-    ValidatedSearchRequest, parse_clear_index_request_json, parse_index_request_json,
-    parse_reindex_by_change_request_json, parse_search_request_json,
+    ClearIndexRequestDto, IndexRequestDto, ReindexByChangeRequestDto, SearchRequestDto,
+    validate_clear_index_request, validate_index_request, validate_reindex_by_change_request,
+    validate_search_request,
 };
+use semantic_code_shared::{ErrorCode, ErrorEnvelope};
+use serde::de::DeserializeOwned;
 use std::fmt;
 
 /// Supported request kinds for validation.
@@ -19,19 +21,6 @@ pub enum RequestKind {
     ReindexByChange,
     /// Clear-index request.
     ClearIndex,
-}
-
-/// Validated request payloads by kind.
-#[derive(Debug)]
-pub enum ValidatedRequest {
-    /// Validated index request.
-    Index(ValidatedIndexRequest),
-    /// Validated search request.
-    Search(ValidatedSearchRequest),
-    /// Validated reindex-by-change request.
-    ReindexByChange(ValidatedReindexByChangeRequest),
-    /// Validated clear-index request.
-    ClearIndex(ValidatedClearIndexRequest),
 }
 
 impl RequestKind {
@@ -54,23 +43,38 @@ impl fmt::Display for RequestKind {
 }
 
 /// Validate a request payload provided as JSON for the given kind.
-pub fn validate_request_json(kind: RequestKind, input_json: &str) -> InfraResult<ValidatedRequest> {
+pub fn validate_request_json(kind: RequestKind, input_json: &str) -> InfraResult<()> {
     match kind {
         RequestKind::Index => {
-            let request = parse_index_request_json(input_json)?;
-            Ok(ValidatedRequest::Index(request))
+            let dto: IndexRequestDto = parse_request_json("index", input_json)?;
+            let _ = validate_index_request(&dto)?;
         },
         RequestKind::Search => {
-            let request = parse_search_request_json(input_json)?;
-            Ok(ValidatedRequest::Search(request))
+            let dto: SearchRequestDto = parse_request_json("search", input_json)?;
+            let _ = validate_search_request(&dto)?;
         },
         RequestKind::ReindexByChange => {
-            let request = parse_reindex_by_change_request_json(input_json)?;
-            Ok(ValidatedRequest::ReindexByChange(request))
+            let dto: ReindexByChangeRequestDto = parse_request_json("reindexByChange", input_json)?;
+            let _ = validate_reindex_by_change_request(&dto)?;
         },
         RequestKind::ClearIndex => {
-            let request = parse_clear_index_request_json(input_json)?;
-            Ok(ValidatedRequest::ClearIndex(request))
+            let dto: ClearIndexRequestDto = parse_request_json("clearIndex", input_json)?;
+            let _ = validate_clear_index_request(&dto)?;
         },
     }
+
+    Ok(())
+}
+
+fn parse_request_json<T: DeserializeOwned>(
+    kind: &'static str,
+    input: &str,
+) -> Result<T, ErrorEnvelope> {
+    serde_json::from_str(input).map_err(|error| {
+        ErrorEnvelope::expected(
+            ErrorCode::new("config", "invalid_json"),
+            format!("invalid {kind} request JSON: {error}"),
+        )
+        .with_metadata("request_kind", kind)
+    })
 }

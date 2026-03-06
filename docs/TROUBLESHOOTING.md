@@ -4,6 +4,27 @@ Common issues and how to solve them.
 
 ## Indexing Issues
 
+### Insufficient Free Space for Indexing
+
+**Problem**: `sca index` fails with an insufficient free-space preflight error.
+
+**Why this happens**:
+- The CLI estimates index storage usage from the current codebase and config.
+- By default, indexing requires **2x** the estimated storage as safety headroom.
+
+**Solutions**:
+1. Run a preflight estimate:
+   ```bash
+   sca estimate-storage
+   sca --output json estimate-storage
+   ```
+2. Free local disk space on the configured snapshot storage target.
+3. Move snapshot storage to a larger disk via `vectorDb.snapshotStorage`.
+
+**Advanced / emergency override**:
+- `sca index --danger-close-storage` lowers the preflight requirement to **1.25x**.
+- Use this only as a temporary workaround under controlled conditions.
+
 ### "Index not found" Error
 
 **Problem**: You try to search but get "Index not found" error.

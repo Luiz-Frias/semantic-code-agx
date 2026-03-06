@@ -8,7 +8,7 @@ use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext,
 use std::sync::Arc;
 use std::time::Instant;
 
-pub struct EmbedBatchTask {
+struct EmbedBatchTask {
     request_ctx: RequestContext,
     embedding: Arc<dyn EmbeddingPort>,
     telemetry: Option<Arc<dyn TelemetryPort>>,
@@ -18,7 +18,7 @@ pub struct EmbedBatchTask {
 }
 
 impl EmbedBatchTask {
-    pub(crate) fn new(ctx: &BatchContext<'_>, batch: Vec<PendingChunk>) -> Self {
+    pub(super) fn new(ctx: &BatchContext<'_>, batch: Vec<PendingChunk>) -> Self {
         Self {
             request_ctx: ctx.ctx.clone(),
             embedding: Arc::clone(&ctx.deps.embedding),
@@ -29,7 +29,7 @@ impl EmbedBatchTask {
         }
     }
 
-    pub(crate) async fn run(self) -> Result<EmbeddedBatch> {
+    pub(super) async fn run(self) -> Result<EmbeddedBatch> {
         let Self {
             request_ctx,
             embedding,
@@ -78,7 +78,7 @@ impl EmbedBatchTask {
         }
 
         let mut documents = Vec::with_capacity(batch.len());
-        for (chunk, vector) in batch.into_iter().zip(vectors.into_iter()) {
+        for (chunk, vector) in batch.into_iter().zip(vectors) {
             let chunk_id = derive_chunk_id(&ChunkIdInput::new(
                 chunk.relative_path.clone(),
                 chunk.span,
@@ -104,7 +104,7 @@ impl EmbedBatchTask {
     }
 }
 
-pub async fn flush_pending_batches<'a>(
+pub(super) async fn flush_pending_batches<'a>(
     ctx: &BatchContext<'a>,
     state: &mut BatchState<'a>,
 ) -> Result<()> {
@@ -116,13 +116,18 @@ pub async fn flush_pending_batches<'a>(
             .pending
             .drain(0..ctx.embedding_batch_size.get())
             .collect::<Vec<_>>();
+        tracing::debug!(
+            batch_size = batch.len(),
+            pending_after_drain = state.pending.len(),
+            "scheduling embedding batch from pending queue"
+        );
         schedule_embedding_batch(ctx, state, batch);
     }
 
     drain_embedding_batches_for_backpressure(ctx, state).await
 }
 
-pub fn schedule_embedding_batch<'a>(
+pub(super) fn schedule_embedding_batch<'a>(
     ctx: &BatchContext<'a>,
     state: &mut BatchState<'a>,
     batch: Vec<PendingChunk>,
@@ -137,6 +142,12 @@ pub fn schedule_embedding_batch<'a>(
         .submit(move || async move { task_ctx.run().await });
 
     state.embedding_tasks.push(Box::pin(task));
+    tracing::debug!(
+        queued_embedding_tasks = state.embedding_tasks.len(),
+        next_batch_to_insert = state.next_batch_to_insert,
+        max_pending_embedding_batches = ctx.max_pending_embedding_batches,
+        "embedding batch task queued"
+    );
 }
 
 async fn drain_embedding_batches_for_backpressure<'a>(
@@ -149,12 +160,18 @@ async fn drain_embedding_batches_for_backpressure<'a>(
         .saturating_sub(state.next_batch_to_insert)
         >= ctx.max_pending_embedding_batches
     {
+        tracing::debug!(
+            queued_embedding_tasks = state.embedding_tasks.len(),
+            next_batch_to_insert = state.next_batch_to_insert,
+            max_pending_embedding_batches = ctx.max_pending_embedding_batches,
+            "embedding backpressure triggered drain"
+        );
         drain_one_embedding_batch(ctx, state).await?;
     }
     Ok(())
 }
 
-pub async fn drain_one_embedding_batch<'a>(
+pub(super) async fn drain_one_embedding_batch<'a>(
     ctx: &BatchContext<'a>,
     state: &mut BatchState<'a>,
 ) -> Result<()> {
@@ -164,6 +181,12 @@ pub async fn drain_one_embedding_batch<'a>(
 
     let batch_index = state.next_batch_to_insert;
     state.next_batch_to_insert += 1;
+    let queued_embedding_tasks = state.embedding_tasks.len();
+    tracing::debug!(
+        batch_index = batch_index,
+        queued_embedding_tasks = queued_embedding_tasks,
+        "draining embedding batch"
+    );
 
     let Some(task) = state.embedding_tasks.get_mut(batch_index) else {
         return Err(ErrorEnvelope::unexpected(
@@ -185,11 +208,16 @@ pub async fn drain_one_embedding_batch<'a>(
             if let Some(logger) = ctx.deps.logger.as_ref() {
                 logger.error(
                     "index.embed_batch_failed",
-                    "Failed to embed chunk batch; continuing",
+                    "Failed to embed chunk batch; aborting",
                     None,
                 );
             }
-            return Ok(());
+            return Err(with_embed_failure_metadata(
+                error,
+                batch_index,
+                queued_embedding_tasks,
+                state.next_batch_to_insert,
+            ));
         },
     };
 
@@ -197,4 +225,18 @@ pub async fn drain_one_embedding_batch<'a>(
     drain_insert_batches_for_backpressure(ctx, state).await?;
 
     Ok(())
+}
+
+fn with_embed_failure_metadata(
+    error: ErrorEnvelope,
+    batch_index: usize,
+    queued_embedding_tasks: usize,
+    next_batch_to_insert: usize,
+) -> ErrorEnvelope {
+    error
+        .with_metadata("stage", "embed")
+        .with_metadata("operation", "index_codebase.embed_batch")
+        .with_metadata("batchIndex", batch_index.to_string())
+        .with_metadata("queuedEmbeddingTasks", queued_embedding_tasks.to_string())
+        .with_metadata("nextBatchToInsert", next_batch_to_insert.to_string())
 }

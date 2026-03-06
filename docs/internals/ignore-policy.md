@@ -29,5 +29,6 @@ patterns. The `.contextignore` file itself is always ignored.
 ## Notes
 
 - Patterns are order-independent; duplicates are ignored.
-- Glob and negation syntax are not supported in Phase 05.
+- A limited `*.ext` wildcard is supported (for file-extension matching); full
+  `gitignore` glob syntax and negation are not supported.
 - The `.context/` state directory is always ignored.

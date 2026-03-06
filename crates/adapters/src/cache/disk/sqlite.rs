@@ -1,6 +1,6 @@
 use super::{SCHEMA_VERSION, disk_error, legacy_suffix, now_epoch_ms};
 use rusqlite::{Connection, OptionalExtension};
-use semantic_code_ports::embedding::EmbeddingVector;
+use semantic_code_ports::EmbeddingVector;
 use semantic_code_shared::{ErrorEnvelope, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -110,7 +110,7 @@ fn open_connection(path: &Path) -> Result<Connection> {
         .map_err(|error| disk_error(&format!("disk cache version failed: {error}")))?;
 
     if version == 0 {
-        conn.execute("PRAGMA user_version = ?1", [SCHEMA_VERSION.to_string()])
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(|error| disk_error(&format!("disk cache version set failed: {error}")))?;
         return Ok(conn);
     }
@@ -180,7 +180,7 @@ fn open_connection_fresh(path: &Path) -> Result<Connection> {
     conn.execute_batch("PRAGMA journal_mode = WAL;")
         .map_err(|error| disk_error(&format!("disk cache pragma failed: {error}")))?;
     init_sqlite_schema(&conn)?;
-    conn.execute("PRAGMA user_version = ?1", [SCHEMA_VERSION.to_string()])
+    conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
         .map_err(|error| disk_error(&format!("disk cache version set failed: {error}")))?;
     Ok(conn)
 }

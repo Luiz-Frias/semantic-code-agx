@@ -5,7 +5,7 @@ This document provides a visual overview of all crates in the workspace and thei
 ## Workspace Structure
 
 ```
-semantic-code-agx/
+semantic-code-agents-rs/
 ├── crates/
 │   ├── adapters/      # Concrete implementations (embeddings, vectordb, fs)
 │   ├── api/           # REST API types and validation
@@ -59,10 +59,10 @@ semantic-code-agx/
         │   (utilities)    │     │   (HNSW, math)   │
         └──────────────────┘     └──────────────────┘
 
-        ┌──────────────────┐
-        │  validate-derive │
-        │   (proc macro)   │
-        └──────────────────┘
+        ┌──────────────────┐     ┌──────────────────┐
+        │  validate-derive │     │       core       │
+        │   (proc macro)   │     │  (build info)    │
+        └──────────────────┘     └──────────────────┘
 ```
 
 ## Crate Details
@@ -254,13 +254,17 @@ pub struct ChunkId {
 
 ---
 
-### `core` - Re-exports
+### `core` - Build Information
 
-**Purpose**: Convenience re-exports for common use.
+**Purpose**: Build-time metadata (package name, version, rustc version, target triple, git hash, profile). No workspace dependencies — safe to import from anywhere.
 
-**Dependencies**: `domain`, `ports`, `app`
+**Key types**:
+- `BuildInfo` - Structured compile-time metadata
+- `build_info()` - Returns `BuildInfo` (const fn)
 
-**Dependents**: External consumers
+**Dependencies**: None (foundation layer)
+
+**Dependents**: `bins/cli` (for `sca info` and `sca self-check`)
 
 ## Feature Flags
 

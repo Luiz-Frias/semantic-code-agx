@@ -701,6 +701,10 @@ mod tests {
         assert_eq!(first, 1);
 
         // Now that capacity is available, the blocked enqueue should complete.
+        #[allow(
+            clippy::expect_used,
+            reason = "test code: JoinHandle panics are test failures"
+        )]
         blocked.await.expect("join failed")?;
 
         let second = queue.dequeue(&ctx).await?;

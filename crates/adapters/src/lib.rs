@@ -3,25 +3,24 @@
 //! Adapter implementations for ports (filesystem, embedding, vectordb, etc.).
 //! This crate depends on `ports`, `shared`, and `vector`.
 
-/// External embedding adapters.
-pub mod embedding;
-
-pub mod cache;
+mod cache;
+mod calibration;
+mod embedding;
 /// Deterministic embedding adapter for tests.
-pub mod embedding_test;
-pub mod file_sync;
-pub mod fs;
-pub mod ignore;
-pub mod log_sink;
-pub mod logger;
-pub mod self_check;
-pub mod splitter;
-pub mod telemetry;
-pub mod vectordb;
-pub mod vectordb_local;
+mod embedding_test;
+mod file_sync;
+mod fs;
+mod ignore;
+mod log_sink;
+mod logger;
+mod self_check;
+mod splitter;
+mod telemetry;
+mod vectordb;
+mod vectordb_local;
 
 /// Placeholder module for adapters.
-pub mod placeholder {
+mod placeholder {
     /// Placeholder function to verify the crate compiles.
     #[must_use]
     pub const fn adapters_crate_version() -> &'static str {
@@ -29,7 +28,45 @@ pub mod placeholder {
     }
 }
 
+pub use cache::{
+    CacheLookup, CacheSource, CachingEmbedding, DiskCacheProvider, EmbeddingCache,
+    EmbeddingCacheConfig,
+};
+pub use calibration::LocalCalibrationAdapter;
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+pub use embedding::ane::{AneEmbedding, AneEmbeddingConfig, AneExecutionMode};
+pub use embedding::fixed::FixedDimensionEmbedding;
+#[cfg(feature = "gemini")]
+pub use embedding::gemini::{GeminiEmbedding, GeminiEmbeddingConfig};
+#[cfg(feature = "ollama")]
+pub use embedding::ollama::{OllamaEmbedding, OllamaEmbeddingConfig};
+#[cfg(feature = "onnx")]
+pub use embedding::onnx::{OnnxEmbedding, OnnxEmbeddingConfig, OnnxEmbeddingFixed};
+#[cfg(feature = "openai")]
+pub use embedding::openai::{OpenAiEmbedding, OpenAiEmbeddingConfig};
+#[cfg(feature = "voyage")]
+pub use embedding::voyage::{VoyageEmbedding, VoyageEmbeddingConfig};
+pub use embedding_test::TestEmbedding;
+pub use file_sync::LocalFileSync;
+pub use fs::{LocalFileSystem, LocalPathPolicy};
+pub use ignore::IgnoreMatcher;
+pub use log_sink::{LogSink, StderrLogSink};
+pub use logger::JsonLogger;
 pub use placeholder::adapters_crate_version;
+pub use self_check::{
+    SelfCheckEmbedding, SelfCheckFileSync, SelfCheckFileSystem, SelfCheckIgnore,
+    SelfCheckPathPolicy, SelfCheckSplitter, SelfCheckVectorDb,
+};
+pub use splitter::TreeSitterSplitter;
+pub use telemetry::{JsonTelemetry, TaggedTelemetry};
+pub use vectordb::fixed::FixedDimensionVectorDb;
+#[cfg(feature = "milvus-grpc")]
+pub use vectordb::milvus::{MilvusGrpcConfig, MilvusGrpcVectorDb};
+#[cfg(any(feature = "milvus-grpc", feature = "milvus-rest"))]
+pub use vectordb::milvus::{MilvusIndexConfig, MilvusIndexSpec};
+#[cfg(feature = "milvus-rest")]
+pub use vectordb::milvus::{MilvusRestConfig, MilvusRestVectorDb};
+pub use vectordb_local::LocalVectorDb;
 
 #[cfg(test)]
 mod tests {

@@ -88,6 +88,23 @@ pub struct ReindexByChangeDeps {
 }
 
 /// Reindex files based on snapshot changes.
+#[tracing::instrument(
+    name = "app.reindex_by_change",
+    skip_all,
+    fields(
+        collection = %input.collection_name.as_str(),
+        index_mode = %input.index_mode.as_str(),
+        has_supported_extensions = input
+            .supported_extensions
+            .as_ref()
+            .is_some_and(|values| !values.is_empty()),
+        has_ignore_patterns = input
+            .ignore_patterns
+            .as_ref()
+            .is_some_and(|values| !values.is_empty()),
+        has_progress_callback = input.on_progress.is_some(),
+    )
+)]
 pub async fn reindex_by_change(
     ctx: &RequestContext,
     deps: &ReindexByChangeDeps,
@@ -149,6 +166,11 @@ pub async fn reindex_by_change(
                     );
                 }
             }
+            tracing::warn!(
+                error = %error,
+                cancelled = error.is_cancelled(),
+                "reindex-by-change failed"
+            );
             Err(error)
         },
     }
@@ -273,6 +295,14 @@ impl ReindexCompleted {
     }
 }
 
+#[tracing::instrument(
+    name = "app.reindex_by_change.run",
+    skip_all,
+    fields(
+        collection = %input.collection_name.as_str(),
+        index_mode = %input.index_mode.as_str(),
+    )
+)]
 async fn run_reindex(
     ctx: &RequestContext,
     deps: &ReindexByChangeDeps,
@@ -290,6 +320,13 @@ async fn run_reindex(
     );
 
     let detected = ReindexPipeline::new(ctx, deps, input).detect().await?;
+    tracing::debug!(
+        added = detected.changes.added.len(),
+        removed = detected.changes.removed.len(),
+        modified = detected.changes.modified.len(),
+        total = detected.total,
+        "detected file changes for reindex"
+    );
     if detected.total == 0 {
         emit_progress(
             input.on_progress.as_ref(),
@@ -317,6 +354,12 @@ async fn run_reindex(
     let modified = removed.delete_modified().await?;
     let completed = modified.reindex_changed().await?;
     let changes = &completed.changes;
+    tracing::debug!(
+        added = changes.added.len(),
+        removed = changes.removed.len(),
+        modified = changes.modified.len(),
+        "completed reindex-by-change pipeline"
+    );
 
     emit_progress(
         input.on_progress.as_ref(),
@@ -352,6 +395,16 @@ async fn run_reindex(
     Ok(completed.output())
 }
 
+#[tracing::instrument(
+    name = "app.reindex_by_change.reindex_changed_files",
+    skip_all,
+    fields(
+        collection = %input.collection_name.as_str(),
+        index_mode = %input.index_mode.as_str(),
+        added = changes.added.len(),
+        modified = changes.modified.len(),
+    )
+)]
 async fn reindex_changed_files(
     ctx: &RequestContext,
     deps: &ReindexByChangeDeps,
@@ -360,8 +413,13 @@ async fn reindex_changed_files(
 ) -> Result<()> {
     let files_to_index = files_to_index(&changes.added, &changes.modified);
     if files_to_index.is_empty() {
+        tracing::debug!("no changed files require reindex");
         return Ok(());
     }
+    tracing::debug!(
+        file_count = files_to_index.len(),
+        "reindexing changed files"
+    );
 
     let file_count_tags = tags_file_count(input.index_mode, files_to_index.len());
     let index_timer = deps.telemetry.as_ref().map(|telemetry| {
@@ -532,10 +590,11 @@ mod tests {
     use semantic_code_ports::{
         CollectionName, DetectDimensionRequest, EmbedBatchRequest, EmbedRequest,
         EmbeddingProviderInfo, EmbeddingVector, FileChangeSet, FileSyncInitOptions,
-        FileSyncOptions, HybridSearchBatchRequest, VectorDbProviderInfo, VectorDbRow,
-        VectorDocumentForInsert, VectorSearchRequest, VectorSearchResult,
+        FileSyncOptions, HybridSearchBatchRequest, LineSpan, SplitOptions, VectorDbProviderInfo,
+        VectorDbRow, VectorDocumentForInsert, VectorSearchRequest, VectorSearchResponse,
     };
     use semantic_code_shared::{ErrorClass, ErrorCode};
+    use std::collections::HashMap;
     use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -654,6 +713,116 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn modified_files_delete_then_reindex() -> Result<()> {
+        let file_sync = Arc::new(StaticFileSync::new(FileChangeSet {
+            added: vec!["src/new.rs".into()],
+            removed: Vec::new(),
+            modified: vec!["src/lib.rs".into()],
+        }));
+        let vectordb = Arc::new(SpyVectorDb::new()?);
+        let filesystem = Arc::new(StaticFileSystem::new([
+            ("src/lib.rs", "pub fn original() { 0 }\n"),
+            ("src/new.rs", "pub fn added() { 1 }\n"),
+        ]));
+        let deps = ReindexByChangeDeps {
+            file_sync,
+            vectordb: vectordb.clone(),
+            embedding: Arc::new(NoopEmbedding::new()?),
+            splitter: Arc::new(ChunkingSplitter),
+            filesystem,
+            path_policy: Arc::new(NoopPathPolicy),
+            ignore: Arc::new(NoopIgnore),
+            logger: None,
+            telemetry: None,
+        };
+        let ctx = RequestContext::new_request();
+        let output = reindex_by_change(
+            &ctx,
+            &deps,
+            ReindexByChangeInput {
+                codebase_root: PathBuf::from("/tmp/repo"),
+                collection_name: CollectionName::parse("code_chunks_test")
+                    .map_err(ErrorEnvelope::from)?,
+                index_mode: IndexMode::Dense,
+                supported_extensions: None,
+                ignore_patterns: None,
+                embedding_batch_size: NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+                chunk_limit: NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+                max_files: None,
+                max_file_size_bytes: None,
+                max_buffered_chunks: None,
+                max_buffered_embeddings: None,
+                max_in_flight_files: None,
+                max_in_flight_embedding_batches: None,
+                max_in_flight_inserts: None,
+                on_progress: None,
+            },
+        )
+        .await?;
+
+        assert_eq!(output.added, 1);
+        assert_eq!(output.modified, 1);
+        assert_eq!(output.removed, 0);
+
+        let state = vectordb.state.lock().map_err(|_| {
+            ErrorEnvelope::unexpected(
+                ErrorCode::internal(),
+                "spy vectordb lock poisoned",
+                ErrorClass::NonRetriable,
+            )
+        })?;
+        assert!(
+            state.actions.len() >= 3,
+            "query, delete, and insert should be observed"
+        );
+        assert!(matches!(
+            state.actions.first(),
+            Some(SpyVectorDbAction::Query)
+        ));
+        let delete_pos = state
+            .actions
+            .iter()
+            .position(|event| matches!(event, SpyVectorDbAction::Delete))
+            .ok_or_else(|| {
+                ErrorEnvelope::expected(
+                    ErrorCode::internal(),
+                    "delete action missing from vectordb spy",
+                )
+            })?;
+        let insert_pos = state
+            .actions
+            .iter()
+            .position(|event| matches!(event, SpyVectorDbAction::Insert))
+            .ok_or_else(|| {
+                ErrorEnvelope::expected(
+                    ErrorCode::internal(),
+                    "insert action missing from vectordb spy",
+                )
+            })?;
+        assert!(delete_pos < insert_pos);
+        assert_eq!(
+            state.last_filter.as_deref(),
+            Some("relativePath == \"src/lib.rs\"")
+        );
+        assert_eq!(state.deleted_ids, vec!["chunk_a".into(), "chunk_b".into()]);
+
+        assert!(
+            state
+                .inserted
+                .iter()
+                .any(|doc| doc.metadata.relative_path.as_ref() == "src/lib.rs")
+        );
+        assert!(
+            state
+                .inserted
+                .iter()
+                .any(|doc| doc.metadata.relative_path.as_ref() == "src/new.rs")
+        );
+
+        Ok(())
+    }
+
     #[derive(Clone)]
     struct SpyVectorDb {
         provider: VectorDbProviderInfo,
@@ -664,6 +833,15 @@ mod tests {
     struct SpyVectorDbState {
         last_filter: Option<Box<str>>,
         deleted_ids: Vec<Box<str>>,
+        inserted: Vec<VectorDocumentForInsert>,
+        actions: Vec<SpyVectorDbAction>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum SpyVectorDbAction {
+        Query,
+        Delete,
+        Insert,
     }
 
     impl SpyVectorDb {
@@ -730,26 +908,55 @@ mod tests {
             &self,
             _ctx: &RequestContext,
             _collection_name: CollectionName,
-            _documents: Vec<VectorDocumentForInsert>,
+            documents: Vec<VectorDocumentForInsert>,
         ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
-            Box::pin(async move { Ok(()) })
+            let state = self.state.clone();
+            Box::pin(async move {
+                let mut guard = state.lock().map_err(|_| {
+                    ErrorEnvelope::unexpected(
+                        ErrorCode::internal(),
+                        "spy vectordb lock poisoned",
+                        ErrorClass::NonRetriable,
+                    )
+                })?;
+                guard.actions.push(SpyVectorDbAction::Insert);
+                guard.inserted.extend(documents);
+                Ok(())
+            })
         }
 
         fn insert_hybrid(
             &self,
             _ctx: &RequestContext,
             _collection_name: CollectionName,
-            _documents: Vec<VectorDocumentForInsert>,
+            documents: Vec<VectorDocumentForInsert>,
         ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
-            Box::pin(async move { Ok(()) })
+            let state = self.state.clone();
+            Box::pin(async move {
+                let mut guard = state.lock().map_err(|_| {
+                    ErrorEnvelope::unexpected(
+                        ErrorCode::internal(),
+                        "spy vectordb lock poisoned",
+                        ErrorClass::NonRetriable,
+                    )
+                })?;
+                guard.actions.push(SpyVectorDbAction::Insert);
+                guard.inserted.extend(documents);
+                Ok(())
+            })
         }
 
         fn search(
             &self,
             _ctx: &RequestContext,
             _request: VectorSearchRequest,
-        ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<VectorSearchResult>>> {
-            Box::pin(async move { Ok(Vec::new()) })
+        ) -> semantic_code_ports::BoxFuture<'_, Result<VectorSearchResponse>> {
+            Box::pin(async move {
+                Ok(VectorSearchResponse {
+                    results: Vec::new(),
+                    stats: None,
+                })
+            })
         }
 
         fn hybrid_search(
@@ -776,6 +983,7 @@ mod tests {
                         ErrorClass::NonRetriable,
                     )
                 })?;
+                guard.actions.push(SpyVectorDbAction::Delete);
                 guard.deleted_ids = ids;
                 Ok(())
             })
@@ -798,14 +1006,34 @@ mod tests {
                         ErrorClass::NonRetriable,
                     )
                 })?;
-                guard.last_filter = Some(filter);
-                Ok(vec![
-                    row_with_id("chunk_a"),
-                    row_with_id(""),
-                    row_with_id("chunk_b"),
-                ])
+                guard.last_filter = Some(filter.clone());
+                guard.actions.push(SpyVectorDbAction::Query);
+                match row_ids_for_filter(filter.as_ref()) {
+                    ids if ids.is_empty() => Ok(Vec::new()),
+                    ids => Ok(ids.iter().map(|id| row_with_id(id)).collect()),
+                }
             })
         }
+    }
+
+    fn row_ids_for_filter(filter: &str) -> Vec<&'static str> {
+        match extract_relative_path(filter) {
+            Some("src/lib.rs") => vec!["chunk_a", "chunk_b"],
+            _ => Vec::new(),
+        }
+    }
+
+    fn extract_relative_path(filter: &str) -> Option<&str> {
+        const PREFIX: &str = "relativePath == \"";
+        if !filter.starts_with(PREFIX) {
+            return None;
+        }
+        let start = PREFIX.len();
+        let end = filter.rfind('\"')?;
+        if end <= start {
+            return None;
+        }
+        Some(&filter[start..end])
     }
 
     fn row_with_id(id: &str) -> VectorDbRow {
@@ -854,9 +1082,125 @@ mod tests {
         fn embed_batch(
             &self,
             _ctx: &RequestContext,
-            _request: EmbedBatchRequest,
+            request: EmbedBatchRequest,
         ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<EmbeddingVector>>> {
+            Box::pin(async move {
+                Ok(request
+                    .texts
+                    .into_iter()
+                    .map(|_| EmbeddingVector::from_vec(vec![0.0; 8]))
+                    .collect())
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct ChunkingSplitter;
+
+    impl SplitterPort for ChunkingSplitter {
+        fn split(
+            &self,
+            _ctx: &RequestContext,
+            code: Box<str>,
+            language: semantic_code_ports::Language,
+            options: SplitOptions,
+        ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<semantic_code_ports::CodeChunk>>>
+        {
+            Box::pin(async move {
+                let lines = u32::try_from(code.lines().count().max(1)).map_err(|_| {
+                    ErrorEnvelope::unexpected(
+                        ErrorCode::internal(),
+                        "line count overflow",
+                        ErrorClass::NonRetriable,
+                    )
+                })?;
+                let span = LineSpan::new(1, lines).map_err(ErrorEnvelope::from)?;
+                Ok(vec![semantic_code_ports::CodeChunk {
+                    content: code,
+                    span,
+                    language: Some(language),
+                    file_path: options.file_path,
+                }])
+            })
+        }
+
+        fn set_chunk_size(&self, _chunk_size: usize) {}
+
+        fn set_chunk_overlap(&self, _chunk_overlap: usize) {}
+    }
+
+    #[derive(Clone)]
+    struct StaticFileSystem {
+        files: Arc<HashMap<Box<str>, Box<str>>>,
+    }
+
+    impl StaticFileSystem {
+        fn new<I, K, V>(entries: I) -> Self
+        where
+            I: IntoIterator<Item = (K, V)>,
+            K: Into<Box<str>>,
+            V: Into<Box<str>>,
+        {
+            let files = entries
+                .into_iter()
+                .map(|(name, contents)| (name.into(), contents.into()))
+                .collect();
+            Self {
+                files: Arc::new(files),
+            }
+        }
+    }
+
+    impl FileSystemPort for StaticFileSystem {
+        fn read_dir(
+            &self,
+            _ctx: &RequestContext,
+            _codebase_root: PathBuf,
+            _dir: semantic_code_ports::SafeRelativePath,
+        ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<semantic_code_ports::FileSystemDirEntry>>>
+        {
             Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn read_file_text(
+            &self,
+            _ctx: &RequestContext,
+            _codebase_root: PathBuf,
+            file: semantic_code_ports::SafeRelativePath,
+        ) -> semantic_code_ports::BoxFuture<'_, Result<Box<str>>> {
+            let files = Arc::clone(&self.files);
+            Box::pin(async move {
+                files.get(file.as_str()).cloned().ok_or_else(|| {
+                    ErrorEnvelope::expected(ErrorCode::not_found(), "file not found")
+                })
+            })
+        }
+
+        fn stat(
+            &self,
+            _ctx: &RequestContext,
+            _codebase_root: PathBuf,
+            path: semantic_code_ports::SafeRelativePath,
+        ) -> semantic_code_ports::BoxFuture<'_, Result<semantic_code_ports::FileSystemStat>>
+        {
+            let files = Arc::clone(&self.files);
+            Box::pin(async move {
+                files.get(path.as_str()).map_or_else(
+                    || {
+                        Err(ErrorEnvelope::expected(
+                            ErrorCode::not_found(),
+                            "file not found",
+                        ))
+                    },
+                    |contents| {
+                        Ok(semantic_code_ports::FileSystemStat {
+                            kind: semantic_code_ports::FileSystemEntryKind::File,
+                            size_bytes: contents.len() as u64,
+                            mtime_ms: 0,
+                        })
+                    },
+                )
+            })
         }
     }
 
@@ -997,7 +1341,7 @@ mod tests {
             _ctx: &RequestContext,
             _code: Box<str>,
             _language: semantic_code_ports::Language,
-            _options: semantic_code_ports::SplitOptions,
+            _options: SplitOptions,
         ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<semantic_code_ports::CodeChunk>>>
         {
             Box::pin(async move { Ok(Vec::new()) })

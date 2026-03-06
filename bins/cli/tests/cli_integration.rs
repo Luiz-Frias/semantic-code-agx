@@ -99,7 +99,7 @@ fn fixture_path(relative: &str) -> std::path::PathBuf {
 fn cli_self_check_runs() -> std::io::Result<()> {
     let output = Command::new(env!("CARGO_BIN_EXE_sca"))
         .args(["self-check"])
-        .env("SCA_EMBEDDING_PROVIDER", "test")
+        .env("SCA_EMBEDDING_PROVIDER", "onnx")
         .output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

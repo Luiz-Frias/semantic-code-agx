@@ -21,15 +21,15 @@
 // PHASE 02: RESULT + ERROR ENVELOPE
 // =============================================================================
 
-pub mod concurrency;
-pub mod errors;
-pub mod invariants;
-pub mod merkle;
-pub mod redaction;
-pub mod result;
-pub mod retry;
-pub mod timeout;
-pub mod validation;
+mod concurrency;
+mod errors;
+mod invariants;
+mod merkle;
+mod redaction;
+mod result;
+mod retry;
+mod timeout;
+mod validation;
 
 // =============================================================================
 // PHASE 04 PLACEHOLDERS
@@ -47,6 +47,7 @@ pub use errors::{
 pub use invariants::{
     BoundedU32, BoundedU64, BoundedUsize, BoundsError, Unvalidated, Validated, ValidatedState,
 };
+pub use merkle::{MerkleDag, MerkleDagDiff, MerkleDagNode, MerkleDagSerialized};
 pub use redaction::{REDACTED, Redacted, SecretString, is_secret_key, redact_if_secret};
 pub use result::{Result, ResultExt};
 pub use retry::{RetryPolicy, retry_async, retry_async_with_observer};

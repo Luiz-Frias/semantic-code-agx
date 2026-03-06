@@ -7,7 +7,7 @@
 pub mod v1;
 
 /// Placeholder module for API helpers.
-pub mod placeholder {
+mod placeholder {
     /// Placeholder function to verify the crate compiles.
     #[must_use]
     pub const fn api_crate_version() -> &'static str {

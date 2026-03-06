@@ -19,11 +19,12 @@ use semantic_code_ports::{
     HybridSearchBatchRequest, HybridSearchData, HybridSearchOptions,
     HybridSearchRequest as PortsHybridSearchRequest, HybridSearchResult, VectorDbPort,
     VectorDbProviderInfo, VectorDbRow, VectorDocument, VectorDocumentForInsert,
-    VectorSearchRequest, VectorSearchResult,
+    VectorSearchRequest, VectorSearchResponse, VectorSearchResult,
 };
 use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tracing::Instrument;
 
 /// Milvus REST adapter configuration.
 #[derive(Debug, Clone)]
@@ -414,32 +415,41 @@ impl VectorDbPort for MilvusRestVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            let spec = build_dense_schema_spec(dimension);
-            let schema = build_rest_schema(&spec);
-            let body = serde_json::json!({
-                "collectionName": collection_name.as_str(),
-                "dbName": adapter.database,
-                "schema": {
-                    "enableDynamicField": false,
-                    "fields": schema.get("fields").cloned().unwrap_or_default(),
-                }
-            });
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.create_collection",
+            collection = %collection,
+            dimension
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                let spec = build_dense_schema_spec(dimension);
+                let schema = build_rest_schema(&spec);
+                let body = serde_json::json!({
+                    "collectionName": collection_name.as_str(),
+                    "dbName": adapter.database,
+                    "schema": {
+                        "enableDynamicField": false,
+                        "fields": schema.get("fields").cloned().unwrap_or_default(),
+                    }
+                });
 
-            let _response: MilvusRestResponse<serde_json::Value> = adapter
-                .make_request(
-                    &ctx,
-                    "/collections/create",
-                    Some(&body),
-                    "milvus_rest.create_collection",
-                    Some(&collection_name),
-                )
-                .await?;
-            adapter.create_index(&ctx, &collection_name).await?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            Ok(())
-        })
+                let _response: MilvusRestResponse<serde_json::Value> = adapter
+                    .make_request(
+                        &ctx,
+                        "/collections/create",
+                        Some(&body),
+                        "milvus_rest.create_collection",
+                        Some(&collection_name),
+                    )
+                    .await?;
+                adapter.create_index(&ctx, &collection_name).await?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                Ok(())
+            }
+            .instrument(span),
+        )
     }
 
     fn create_hybrid_collection(
@@ -451,34 +461,43 @@ impl VectorDbPort for MilvusRestVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            let spec = build_hybrid_schema_spec(dimension);
-            let schema = build_rest_schema(&spec);
-            let body = serde_json::json!({
-                "collectionName": collection_name.as_str(),
-                "dbName": adapter.database,
-                "schema": {
-                    "enableDynamicField": false,
-                    "fields": schema.get("fields").cloned().unwrap_or_default(),
-                    "functions": schema.get("functions").cloned().unwrap_or_default(),
-                }
-            });
-            let _response: MilvusRestResponse<serde_json::Value> = adapter
-                .make_request(
-                    &ctx,
-                    "/collections/create",
-                    Some(&body),
-                    "milvus_rest.create_hybrid_collection",
-                    Some(&collection_name),
-                )
-                .await?;
-            adapter
-                .create_hybrid_indexes(&ctx, &collection_name)
-                .await?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            Ok(())
-        })
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.create_hybrid_collection",
+            collection = %collection,
+            dimension
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                let spec = build_hybrid_schema_spec(dimension);
+                let schema = build_rest_schema(&spec);
+                let body = serde_json::json!({
+                    "collectionName": collection_name.as_str(),
+                    "dbName": adapter.database,
+                    "schema": {
+                        "enableDynamicField": false,
+                        "fields": schema.get("fields").cloned().unwrap_or_default(),
+                        "functions": schema.get("functions").cloned().unwrap_or_default(),
+                    }
+                });
+                let _response: MilvusRestResponse<serde_json::Value> = adapter
+                    .make_request(
+                        &ctx,
+                        "/collections/create",
+                        Some(&body),
+                        "milvus_rest.create_hybrid_collection",
+                        Some(&collection_name),
+                    )
+                    .await?;
+                adapter
+                    .create_hybrid_indexes(&ctx, &collection_name)
+                    .await?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                Ok(())
+            }
+            .instrument(span),
+        )
     }
 
     fn drop_collection(
@@ -488,23 +507,31 @@ impl VectorDbPort for MilvusRestVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            let body = serde_json::json!({
-                "collectionName": collection_name.as_str(),
-                "dbName": adapter.database,
-            });
-            let _response: MilvusRestResponse<serde_json::Value> = adapter
-                .make_request(
-                    &ctx,
-                    "/collections/drop",
-                    Some(&body),
-                    "milvus_rest.drop_collection",
-                    Some(&collection_name),
-                )
-                .await?;
-            Ok(())
-        })
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.drop_collection",
+            collection = %collection
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                let body = serde_json::json!({
+                    "collectionName": collection_name.as_str(),
+                    "dbName": adapter.database,
+                });
+                let _response: MilvusRestResponse<serde_json::Value> = adapter
+                    .make_request(
+                        &ctx,
+                        "/collections/drop",
+                        Some(&body),
+                        "milvus_rest.drop_collection",
+                        Some(&collection_name),
+                    )
+                    .await?;
+                Ok(())
+            }
+            .instrument(span),
+        )
     }
 
     fn has_collection(
@@ -514,28 +541,36 @@ impl VectorDbPort for MilvusRestVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<bool>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            let body = serde_json::json!({
-                "collectionName": collection_name.as_str(),
-                "dbName": adapter.database,
-            });
-            let response: MilvusRestResponse<serde_json::Value> = adapter
-                .make_request(
-                    &ctx,
-                    "/collections/has",
-                    Some(&body),
-                    "milvus_rest.has_collection",
-                    Some(&collection_name),
-                )
-                .await?;
-            let exists = response
-                .data
-                .and_then(|value| value.get("value").cloned())
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
-            Ok(exists)
-        })
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.has_collection",
+            collection = %collection
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                let body = serde_json::json!({
+                    "collectionName": collection_name.as_str(),
+                    "dbName": adapter.database,
+                });
+                let response: MilvusRestResponse<serde_json::Value> = adapter
+                    .make_request(
+                        &ctx,
+                        "/collections/has",
+                        Some(&body),
+                        "milvus_rest.has_collection",
+                        Some(&collection_name),
+                    )
+                    .await?;
+                let exists = response
+                    .data
+                    .and_then(|value| value.get("value").cloned())
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                Ok(exists)
+            }
+            .instrument(span),
+        )
     }
 
     fn list_collections(
@@ -544,29 +579,33 @@ impl VectorDbPort for MilvusRestVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<CollectionName>>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            let body = serde_json::json!({ "dbName": adapter.database });
-            let response: MilvusRestResponse<CollectionListData> = adapter
-                .make_request(
-                    &ctx,
-                    "/collections/list",
-                    Some(&body),
-                    "milvus_rest.list_collections",
-                    None,
-                )
-                .await?;
-            let names = response
-                .data
-                .and_then(|data| data.collection_names)
-                .unwrap_or_default();
-            let mut out = Vec::new();
-            for name in names {
-                if let Ok(parsed) = CollectionName::parse(name.as_str()) {
-                    out.push(parsed);
+        let span = tracing::info_span!("adapter.vectordb.milvus.rest.list_collections");
+        Box::pin(
+            async move {
+                let body = serde_json::json!({ "dbName": adapter.database });
+                let response: MilvusRestResponse<CollectionListData> = adapter
+                    .make_request(
+                        &ctx,
+                        "/collections/list",
+                        Some(&body),
+                        "milvus_rest.list_collections",
+                        None,
+                    )
+                    .await?;
+                let names = response
+                    .data
+                    .and_then(|data| data.collection_names)
+                    .unwrap_or_default();
+                let mut out = Vec::new();
+                for name in names {
+                    if let Ok(parsed) = CollectionName::parse(name.as_str()) {
+                        out.push(parsed);
+                    }
                 }
+                Ok(out)
             }
-            Ok(out)
-        })
+            .instrument(span),
+        )
     }
 
     fn insert(
@@ -577,39 +616,49 @@ impl VectorDbPort for MilvusRestVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            let mut data = Vec::with_capacity(documents.len());
-            for doc in documents {
-                let metadata = serialize_metadata(&doc.metadata)?;
-                data.push(serde_json::json!({
-                    "id": doc.id,
-                    "content": doc.content,
-                    "vector": doc.vector.as_ref(),
-                    "relativePath": doc.metadata.relative_path,
-                    "startLine": doc.metadata.span.start_line(),
-                    "endLine": doc.metadata.span.end_line(),
-                    "fileExtension": doc.metadata.file_extension.unwrap_or_default(),
-                    "metadata": metadata,
-                }));
+        let doc_count = documents.len();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.insert",
+            collection = %collection,
+            doc_count
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                let mut data = Vec::with_capacity(documents.len());
+                for doc in documents {
+                    let metadata = serialize_metadata(&doc.metadata)?;
+                    data.push(serde_json::json!({
+                        "id": doc.id,
+                        "content": doc.content,
+                        "vector": doc.vector.as_ref(),
+                        "relativePath": doc.metadata.relative_path,
+                        "startLine": doc.metadata.span.start_line(),
+                        "endLine": doc.metadata.span.end_line(),
+                        "fileExtension": doc.metadata.file_extension.unwrap_or_default(),
+                        "metadata": metadata,
+                    }));
+                }
+                let body = serde_json::json!({
+                    "collectionName": collection_name.as_str(),
+                    "dbName": adapter.database,
+                    "data": data,
+                });
+                let _response: MilvusRestResponse<serde_json::Value> = adapter
+                    .make_request(
+                        &ctx,
+                        "/entities/insert",
+                        Some(&body),
+                        "milvus_rest.insert",
+                        Some(&collection_name),
+                    )
+                    .await?;
+                Ok(())
             }
-            let body = serde_json::json!({
-                "collectionName": collection_name.as_str(),
-                "dbName": adapter.database,
-                "data": data,
-            });
-            let _response: MilvusRestResponse<serde_json::Value> = adapter
-                .make_request(
-                    &ctx,
-                    "/entities/insert",
-                    Some(&body),
-                    "milvus_rest.insert",
-                    Some(&collection_name),
-                )
-                .await?;
-            Ok(())
-        })
+            .instrument(span),
+        )
     }
 
     fn insert_hybrid(
@@ -618,14 +667,22 @@ impl VectorDbPort for MilvusRestVectorDb {
         collection_name: CollectionName,
         documents: Vec<VectorDocumentForInsert>,
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
-        self.insert(ctx, collection_name, documents)
+        let doc_count = documents.len();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.insert_hybrid",
+            collection = %collection,
+            doc_count
+        );
+        let future = self.insert(ctx, collection_name, documents);
+        Box::pin(future.instrument(span))
     }
 
     fn search(
         &self,
         ctx: &RequestContext,
         request: VectorSearchRequest,
-    ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<VectorSearchResult>>> {
+    ) -> semantic_code_ports::BoxFuture<'_, Result<VectorSearchResponse>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
         let VectorSearchRequest {
@@ -633,50 +690,65 @@ impl VectorDbPort for MilvusRestVectorDb {
             query_vector,
             options,
         } = request;
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
+        let top_k = options.top_k.unwrap_or(10);
+        let has_filter = options.filter_expr.is_some();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.search",
+            collection = %collection,
+            top_k,
+            has_filter
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
 
-            let mut search_request = serde_json::json!({
-                "collectionName": collection_name.as_str(),
-                "dbName": adapter.database,
-                "searchParams": {
-                    "metricType": adapter.index_config.dense.metric_type,
-                    "params": { "nprobe": 10 }
-                },
-                "limit": options.top_k.unwrap_or(10),
-                "outputFields": MILVUS_OUTPUT_FIELDS,
-                "data": [query_vector.as_ref()],
-            });
-            if let Some(filter) = options.filter_expr {
-                search_request.as_object_mut().map(|map| {
-                    map.insert(
-                        "filter".to_owned(),
-                        serde_json::Value::String(filter.into()),
+                let mut search_request = serde_json::json!({
+                    "collectionName": collection_name.as_str(),
+                    "dbName": adapter.database,
+                    "searchParams": {
+                        "metricType": adapter.index_config.dense.metric_type,
+                        "params": { "nprobe": 10 }
+                    },
+                    "limit": options.top_k.unwrap_or(10),
+                    "outputFields": MILVUS_OUTPUT_FIELDS,
+                    "data": [query_vector.as_ref()],
+                });
+                if let Some(filter) = options.filter_expr {
+                    search_request.as_object_mut().map(|map| {
+                        map.insert(
+                            "filter".to_owned(),
+                            serde_json::Value::String(filter.into()),
+                        )
+                    });
+                }
+
+                let response: MilvusRestResponse<SearchData> = adapter
+                    .make_request(
+                        &ctx,
+                        "/entities/search",
+                        Some(&search_request),
+                        "milvus_rest.search",
+                        Some(&collection_name),
                     )
-                });
+                    .await?;
+                let rows = response.data.and_then(|data| data.data).unwrap_or_default();
+                let mut results = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let doc = Self::row_to_doc(&row)?;
+                    results.push(VectorSearchResult {
+                        document: doc,
+                        score: row.score.unwrap_or_default(),
+                    });
+                }
+                Ok(VectorSearchResponse {
+                    results,
+                    stats: None,
+                })
             }
-
-            let response: MilvusRestResponse<SearchData> = adapter
-                .make_request(
-                    &ctx,
-                    "/entities/search",
-                    Some(&search_request),
-                    "milvus_rest.search",
-                    Some(&collection_name),
-                )
-                .await?;
-            let rows = response.data.and_then(|data| data.data).unwrap_or_default();
-            let mut results = Vec::with_capacity(rows.len());
-            for row in rows {
-                let doc = Self::row_to_doc(&row)?;
-                results.push(VectorSearchResult {
-                    document: doc,
-                    score: row.score.unwrap_or_default(),
-                });
-            }
-            Ok(results)
-        })
+            .instrument(span),
+        )
     }
 
     fn hybrid_search(
@@ -691,38 +763,52 @@ impl VectorDbPort for MilvusRestVectorDb {
             search_requests,
             options,
         } = request;
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
+        let request_count = search_requests.len();
+        let has_filter = options.filter_expr.is_some();
+        let limit = options.limit.unwrap_or(10);
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.hybrid_search",
+            collection = %collection,
+            request_count,
+            has_filter,
+            limit
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
 
-            let body = build_hybrid_search_body(
-                &collection_name,
-                adapter.database.as_deref(),
-                &search_requests,
-                &options,
-                &adapter.index_config,
-            )?;
+                let body = build_hybrid_search_body(
+                    &collection_name,
+                    adapter.database.as_deref(),
+                    &search_requests,
+                    &options,
+                    &adapter.index_config,
+                )?;
 
-            let response: MilvusRestResponse<SearchData> = adapter
-                .make_request(
-                    &ctx,
-                    "/entities/hybrid_search",
-                    Some(&body),
-                    "milvus_rest.hybrid_search",
-                    Some(&collection_name),
-                )
-                .await?;
-            let rows = response.data.and_then(|data| data.data).unwrap_or_default();
-            let mut results = Vec::with_capacity(rows.len());
-            for row in rows {
-                let doc = Self::row_to_doc(&row)?;
-                results.push(HybridSearchResult {
-                    document: doc,
-                    score: row.score.unwrap_or_default(),
-                });
+                let response: MilvusRestResponse<SearchData> = adapter
+                    .make_request(
+                        &ctx,
+                        "/entities/hybrid_search",
+                        Some(&body),
+                        "milvus_rest.hybrid_search",
+                        Some(&collection_name),
+                    )
+                    .await?;
+                let rows = response.data.and_then(|data| data.data).unwrap_or_default();
+                let mut results = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let doc = Self::row_to_doc(&row)?;
+                    results.push(HybridSearchResult {
+                        document: doc,
+                        score: row.score.unwrap_or_default(),
+                    });
+                }
+                Ok(results)
             }
-            Ok(results)
-        })
+            .instrument(span),
+        )
     }
 
     fn delete(
@@ -733,26 +819,36 @@ impl VectorDbPort for MilvusRestVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            let filter = milvus_in_string("id", &ids);
-            let body = serde_json::json!({
-                "collectionName": collection_name.as_str(),
-                "dbName": adapter.database,
-                "filter": filter,
-            });
-            let _response: MilvusRestResponse<serde_json::Value> = adapter
-                .make_request(
-                    &ctx,
-                    "/entities/delete",
-                    Some(&body),
-                    "milvus_rest.delete",
-                    Some(&collection_name),
-                )
-                .await?;
-            Ok(())
-        })
+        let id_count = ids.len();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.delete",
+            collection = %collection,
+            id_count
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                let filter = milvus_in_string("id", &ids);
+                let body = serde_json::json!({
+                    "collectionName": collection_name.as_str(),
+                    "dbName": adapter.database,
+                    "filter": filter,
+                });
+                let _response: MilvusRestResponse<serde_json::Value> = adapter
+                    .make_request(
+                        &ctx,
+                        "/entities/delete",
+                        Some(&body),
+                        "milvus_rest.delete",
+                        Some(&collection_name),
+                    )
+                    .await?;
+                Ok(())
+            }
+            .instrument(span),
+        )
     }
 
     fn query(
@@ -765,54 +861,68 @@ impl VectorDbPort for MilvusRestVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<VectorDbRow>>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            let body = serde_json::json!({
-                "collectionName": collection_name.as_str(),
-                "dbName": adapter.database,
-                "filter": filter,
-                "outputFields": output_fields,
-                "limit": limit,
-            });
-            let response: MilvusRestResponse<SearchData> = adapter
-                .make_request(
-                    &ctx,
-                    "/entities/query",
-                    Some(&body),
-                    "milvus_rest.query",
-                    Some(&collection_name),
-                )
-                .await?;
-            let rows = response.data.and_then(|data| data.data).unwrap_or_default();
-            let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                let mut map = VectorDbRow::new();
-                if let Some(id) = row.id {
-                    map.insert("id".into(), serde_json::Value::String(id));
+        let has_filter = !filter.is_empty();
+        let output_field_count = output_fields.len();
+        let has_limit = limit.is_some();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.rest.query",
+            collection = %collection,
+            has_filter,
+            output_field_count,
+            has_limit
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                let body = serde_json::json!({
+                    "collectionName": collection_name.as_str(),
+                    "dbName": adapter.database,
+                    "filter": filter,
+                    "outputFields": output_fields,
+                    "limit": limit,
+                });
+                let response: MilvusRestResponse<SearchData> = adapter
+                    .make_request(
+                        &ctx,
+                        "/entities/query",
+                        Some(&body),
+                        "milvus_rest.query",
+                        Some(&collection_name),
+                    )
+                    .await?;
+                let rows = response.data.and_then(|data| data.data).unwrap_or_default();
+                let mut out = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let mut map = VectorDbRow::new();
+                    if let Some(id) = row.id {
+                        map.insert("id".into(), serde_json::Value::String(id));
+                    }
+                    if let Some(relative_path) = row.relative_path {
+                        map.insert(
+                            "relativePath".into(),
+                            serde_json::Value::String(relative_path),
+                        );
+                    }
+                    if let Some(start_line) = row.start_line {
+                        map.insert("startLine".into(), serde_json::Value::from(start_line));
+                    }
+                    if let Some(end_line) = row.end_line {
+                        map.insert("endLine".into(), serde_json::Value::from(end_line));
+                    }
+                    if let Some(extension) = row.file_extension {
+                        map.insert("fileExtension".into(), serde_json::Value::String(extension));
+                    }
+                    if let Some(content) = row.content {
+                        map.insert("content".into(), serde_json::Value::String(content));
+                    }
+                    out.push(map);
                 }
-                if let Some(relative_path) = row.relative_path {
-                    map.insert(
-                        "relativePath".into(),
-                        serde_json::Value::String(relative_path),
-                    );
-                }
-                if let Some(start_line) = row.start_line {
-                    map.insert("startLine".into(), serde_json::Value::from(start_line));
-                }
-                if let Some(end_line) = row.end_line {
-                    map.insert("endLine".into(), serde_json::Value::from(end_line));
-                }
-                if let Some(extension) = row.file_extension {
-                    map.insert("fileExtension".into(), serde_json::Value::String(extension));
-                }
-                if let Some(content) = row.content {
-                    map.insert("content".into(), serde_json::Value::String(content));
-                }
-                out.push(map);
+                Ok(out)
             }
-            Ok(out)
-        })
+            .instrument(span),
+        )
     }
 }
 

@@ -1,39 +1,42 @@
 //! Local CLI orchestration helpers.
 
-use crate::cli_manifest::touch_manifest;
-use crate::embedding_factory::build_embedding_port_with_telemetry;
-use crate::vectordb_factory::build_vectordb_port;
-use crate::{
-    CliManifest, InfraError, InfraResult, append_context_gitignore,
-    config_path as context_config_path, ensure_default_config, read_manifest, write_manifest,
+use crate::calibration_persist::{apply_ema_observation, clear_ema_sidecars};
+use crate::cli_calibration::{read_calibration, write_calibration};
+use crate::cli_manifest::{
+    CliManifest, append_context_gitignore, config_path as context_config_path,
+    ensure_default_config, read_manifest, touch_manifest, write_manifest,
 };
-use semantic_code_adapters::file_sync::LocalFileSync;
-use semantic_code_adapters::fs::{LocalFileSystem, LocalPathPolicy};
-use semantic_code_adapters::ignore::IgnoreMatcher;
-use semantic_code_adapters::log_sink::StderrLogSink;
-use semantic_code_adapters::logger::JsonLogger;
-use semantic_code_adapters::splitter::TreeSitterSplitter;
-use semantic_code_adapters::telemetry::{JsonTelemetry, TaggedTelemetry};
+use crate::embedding_factory::build_embedding_port_with_telemetry;
+use crate::vectordb_factory::{build_local_kernel, build_vectordb_port};
+use crate::{InfraError, InfraResult};
+use semantic_code_adapters::{
+    IgnoreMatcher, JsonLogger, JsonTelemetry, LocalCalibrationAdapter, LocalFileSync,
+    LocalFileSystem, LocalPathPolicy, StderrLogSink, TaggedTelemetry, TreeSitterSplitter,
+};
 use semantic_code_app::{
-    ClearIndexDeps, ClearIndexInput, IndexCodebaseDeps, IndexCodebaseInput, IndexCodebaseOutput,
-    IndexProgress, ReindexByChangeDeps, ReindexByChangeInput, ReindexByChangeOutput,
-    SemanticSearchDeps, SemanticSearchInput, clear_index, index_codebase, reindex_by_change,
+    CalibrateBq1Deps, CalibrateBq1Input, ClearIndexDeps, ClearIndexInput, IndexCodebaseDeps,
+    IndexCodebaseInput, IndexCodebaseOutput, IndexProgress, ReindexByChangeDeps,
+    ReindexByChangeInput, ReindexByChangeOutput, SemanticSearchDeps, SemanticSearchInput,
+    SemanticSearchOutput, calibrate_bq1, clear_index, index_codebase, reindex_by_change,
     semantic_search,
 };
 use semantic_code_config::{
-    BackendConfig, BackendEnv, SnapshotStorageMode, ValidatedBackendConfig,
+    BackendConfig, RuntimeEnv, SnapshotStorageMode, ValidatedBackendConfig,
     ValidatedClearIndexRequest, ValidatedIndexRequest, ValidatedReindexByChangeRequest,
-    ValidatedSearchRequest, load_backend_config_from_path, load_backend_config_std_env,
-    to_pretty_toml,
+    ValidatedSearchRequest, VectorSearchStrategy, load_backend_config_from_path,
+    load_backend_config_std_env, load_runtime_env_std_env, to_pretty_toml,
 };
 use semantic_code_domain::{
-    CollectionName, CollectionNamingInput, IndexMode, SearchResult, derive_collection_name,
+    CalibrationParams, CalibrationState, CollectionName, CollectionNamingInput, IndexMode,
+    derive_collection_name,
 };
 use semantic_code_ports::{LogFields, LogLevel, LoggerPort, TelemetryPort, TelemetryTags};
 use semantic_code_shared::{
     BoundedU32, ErrorClass, ErrorCode, ErrorEnvelope, REDACTED_VALUE, RequestContext,
 };
+use semantic_code_vector::VectorSearchBackend;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -226,6 +229,18 @@ fn build_splitter(config: &ValidatedBackendConfig) -> InfraResult<TreeSitterSpli
 }
 
 /// Run a local index operation with optional progress and cancellation.
+#[tracing::instrument(
+    name = "cli.index.local_with_progress",
+    skip_all,
+    fields(
+        correlation_id = tracing::field::Empty,
+        has_config_path = config_path.is_some(),
+        has_overrides = overrides_json.is_some(),
+        init_if_missing = init_if_missing,
+        has_progress_callback = on_progress.is_some(),
+        has_cancel_path = cancel_path.is_some(),
+    )
+)]
 pub fn run_index_local_with_progress(
     config_path: Option<&Path>,
     overrides_json: Option<&str>,
@@ -240,6 +255,7 @@ pub fn run_index_local_with_progress(
     let manifest = ensure_manifest(codebase_root, &config, init_if_missing)?;
     let observability = observability_from_env();
     let ctx = RequestContext::new_request();
+    tracing::Span::current().record("correlation_id", ctx.correlation_id().as_str());
     let scoped_logger = scope_logger(observability.logger.as_ref(), &ctx);
     let scoped_telemetry = scope_telemetry(observability.telemetry.as_ref(), &ctx);
     let embedding = build_embedding_port_with_telemetry(
@@ -249,6 +265,15 @@ pub fn run_index_local_with_progress(
         scoped_telemetry.clone(),
     )?;
     let input = build_index_input(&config, &manifest, request, on_progress)?;
+
+    // Capture auto-calibrate flag before config is moved into the async closure.
+    let should_auto_calibrate = config.vector_db.effective_vector_kernel()
+        == semantic_code_config::VectorKernelKind::Dfrr
+        && config
+            .vector_db
+            .dfrr_search
+            .as_ref()
+            .is_some_and(|d| d.auto_calibrate);
 
     let snapshot_storage = manifest.snapshot_storage.clone();
     let codebase_root = request.as_ref().codebase_root.clone();
@@ -271,20 +296,43 @@ pub fn run_index_local_with_progress(
             logger: scoped_logger,
             telemetry: scoped_telemetry,
         };
+        let collection_name = input.collection_name.clone();
         let result = index_codebase(&ctx, &deps, input).await;
+        let result = match result {
+            Ok(output) => {
+                deps.vectordb.flush(&ctx, collection_name).await?;
+                Ok(output)
+            },
+            Err(err) => Err(err),
+        };
         finalize_cancel_watcher(cancel_handle).await?;
         result
     })?;
     touch_manifest(&codebase_root, &manifest)?;
+
+    // Auto-calibrate BQ1 threshold if configured and no calibration file exists.
+    if should_auto_calibrate {
+        auto_calibrate_after_index(config_path.as_deref(), overrides_json, &codebase_root);
+    }
+
     Ok(output)
 }
 
 /// Run a local semantic search.
+#[tracing::instrument(
+    name = "cli.search.local",
+    skip_all,
+    fields(
+        correlation_id = tracing::field::Empty,
+        has_config_path = config_path.is_some(),
+        has_overrides = overrides_json.is_some(),
+    )
+)]
 pub fn run_search_local(
     config_path: Option<&Path>,
     overrides_json: Option<&str>,
     request: &ValidatedSearchRequest,
-) -> InfraResult<Vec<SearchResult>> {
+) -> InfraResult<SemanticSearchOutput> {
     let request = request.as_ref();
     let codebase_root = request.codebase_root.as_path();
     let config_path = resolve_config_path(config_path, codebase_root);
@@ -292,6 +340,7 @@ pub fn run_search_local(
     let manifest = ensure_manifest(codebase_root, &config, false)?;
     let observability = observability_from_env();
     let ctx = RequestContext::new_request();
+    tracing::Span::current().record("correlation_id", ctx.correlation_id().as_str());
     let scoped_logger = scope_logger(observability.logger.as_ref(), &ctx);
     let scoped_telemetry = scope_telemetry(observability.telemetry.as_ref(), &ctx);
     let embedding = build_embedding_port_with_telemetry(
@@ -310,6 +359,7 @@ pub fn run_search_local(
             .threshold
             .map(|value| f32_from_f64(value, "threshold"))
             .transpose()?,
+        query_vector: None,
     };
 
     let snapshot_storage = manifest.snapshot_storage;
@@ -322,11 +372,228 @@ pub fn run_search_local(
             logger: scoped_logger,
             telemetry: scoped_telemetry,
         };
-        semantic_search(&ctx, &deps, input).await
+        let output = semantic_search(&ctx, &deps, input).await?;
+
+        // Observe BQ1 EMA if calibration exists and search returned DFRR stats.
+        if let Some(ref stats) = output.stats {
+            observe_ema_if_calibrated(&codebase_root, stats);
+        }
+
+        Ok(output)
     })
 }
 
+// ── Warm search session for stdin-batch mode ─────────────────────────────────
+
+/// A pre-warmed search session that keeps config, embedding, and vectordb loaded.
+///
+/// Created via [`open_search_session`]. Each [`search`](LocalSearchSession::search)
+/// call reuses the warm context — only query embedding and vector lookup run per call.
+pub struct LocalSearchSession {
+    deps: SemanticSearchDeps,
+    collection_name: CollectionName,
+    index_mode: IndexMode,
+    codebase_root: Box<str>,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl LocalSearchSession {
+    /// Execute a single search against the warm session.
+    pub fn search(
+        &self,
+        query: &str,
+        top_k: Option<u32>,
+        threshold: Option<f32>,
+    ) -> InfraResult<SemanticSearchOutput> {
+        let ctx = RequestContext::new_request();
+        let deps = self.deps.clone();
+        let input = SemanticSearchInput {
+            codebase_root: self.codebase_root.clone(),
+            collection_name: self.collection_name.clone(),
+            index_mode: self.index_mode,
+            query: query.into(),
+            top_k,
+            threshold,
+            query_vector: None,
+        };
+        self.runtime
+            .block_on(async { semantic_search(&ctx, &deps, input).await })
+    }
+
+    /// Execute a search using a pre-computed query embedding vector.
+    pub fn search_with_vector(
+        &self,
+        query_label: &str,
+        vector: semantic_code_ports::EmbeddingVector,
+        top_k: Option<u32>,
+        threshold: Option<f32>,
+    ) -> InfraResult<SemanticSearchOutput> {
+        let ctx = RequestContext::new_request();
+        let deps = self.deps.clone();
+        let input = SemanticSearchInput {
+            codebase_root: self.codebase_root.clone(),
+            collection_name: self.collection_name.clone(),
+            index_mode: self.index_mode,
+            query: query_label.into(),
+            top_k,
+            threshold,
+            query_vector: Some(vector),
+        };
+        self.runtime
+            .block_on(async { semantic_search(&ctx, &deps, input).await })
+    }
+
+    /// Embed a query string and return the raw vector.
+    pub fn embed(&self, query: &str) -> InfraResult<semantic_code_ports::EmbeddingVector> {
+        let ctx = RequestContext::new_request();
+        let deps = self.deps.clone();
+        self.runtime.block_on(async {
+            ctx.ensure_not_cancelled("embed")?;
+            deps.embedding.embed(&ctx, query.into()).await
+        })
+    }
+}
+
+/// Open a warm search session by loading config, embedding, and vectordb once.
+///
+/// The returned [`LocalSearchSession`] can be used to run multiple searches
+/// without re-loading the index or rebuilding the HNSW graph.
+#[tracing::instrument(
+    name = "infra.open_search_session",
+    skip_all,
+    fields(
+        has_config_path = config_path.is_some(),
+        has_overrides_json = overrides_json.is_some()
+    )
+)]
+pub fn open_search_session(
+    config_path: Option<&Path>,
+    overrides_json: Option<&str>,
+    codebase_root: &Path,
+) -> InfraResult<LocalSearchSession> {
+    let config_path = resolve_config_path(config_path, codebase_root);
+    let (config, env) = load_config_with_env(config_path.as_deref(), overrides_json)?;
+    let manifest = ensure_manifest(codebase_root, &config, false)?;
+    let observability = observability_from_env();
+    let ctx = RequestContext::new_request();
+    let scoped_logger = scope_logger(observability.logger.as_ref(), &ctx);
+    let scoped_telemetry = scope_telemetry(observability.telemetry.as_ref(), &ctx);
+    let embedding = build_embedding_port_with_telemetry(
+        &config,
+        &env,
+        codebase_root,
+        scoped_telemetry.clone(),
+    )?;
+
+    let snapshot_storage = manifest.snapshot_storage;
+    let codebase_root_buf = codebase_root.to_path_buf();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(InfraError::from)?;
+
+    let vectordb = runtime.block_on(async {
+        build_vectordb_port(&config, &codebase_root_buf, snapshot_storage).await
+    })?;
+
+    let deps = SemanticSearchDeps {
+        embedding,
+        vectordb,
+        logger: scoped_logger,
+        telemetry: scoped_telemetry,
+    };
+
+    tracing::info!("search session opened; index loaded and warm");
+
+    Ok(LocalSearchSession {
+        deps,
+        collection_name: manifest.collection_name,
+        index_mode: manifest.index_mode,
+        codebase_root: codebase_root.to_string_lossy().to_string().into_boxed_str(),
+        runtime,
+    })
+}
+
+/// Observe BQ1 EMA if a calibration sidecar exists and the stats contain DFRR metrics.
+///
+/// Best-effort: silently ignores read/write errors (non-critical path).
+fn observe_ema_if_calibrated(
+    codebase_root: &Path,
+    search_stats: &semantic_code_domain::SearchStats,
+) {
+    let Ok(Some(observation)) = apply_ema_observation(codebase_root, search_stats) else {
+        return;
+    };
+
+    tracing::debug!(
+        observed_skip_rate = format_args!("{:.4}", observation.observed_skip_rate),
+        ema_skip_rate = format_args!("{:.4}", observation.ema_skip_rate),
+        samples_seen = observation.samples_seen,
+        "BQ1 EMA observation"
+    );
+
+    if observation.drift_detected {
+        tracing::warn!(
+            calibrated_skip_rate = format_args!("{:.4}", observation.calibrated_skip_rate),
+            ema_skip_rate = format_args!("{:.4}", observation.ema_skip_rate),
+            "BQ1 skip rate drift detected \u{2014} consider re-running `sca calibrate`"
+        );
+    }
+}
+
+/// Run BQ1 calibration automatically after indexing, if no calibration file exists.
+///
+/// Best-effort: logs a warning on failure but never propagates errors.
+fn auto_calibrate_after_index(
+    config_path: Option<&Path>,
+    overrides_json: Option<&str>,
+    codebase_root: &Path,
+) {
+    // Skip if calibration already exists.
+    match read_calibration(codebase_root) {
+        Ok(Some(_)) => {
+            tracing::debug!("auto-calibrate skipped: calibration file already exists");
+            return;
+        },
+        Ok(None) => {},
+        Err(error) => {
+            tracing::warn!(error = %error, "auto-calibrate: failed to check calibration file");
+            return;
+        },
+    }
+
+    tracing::info!("auto-calibrating BQ1 threshold after index (autoCalibrate = true)");
+
+    let params = CalibrationParams::default();
+    match run_calibrate_local(config_path, overrides_json, codebase_root, &params) {
+        Ok(state) => {
+            tracing::info!(
+                threshold = format_args!("{:.4}", state.threshold),
+                recall = format_args!("{:.4}", state.recall_at_threshold),
+                skip_rate = format_args!("{:.4}", state.skip_rate),
+                "auto-calibration complete"
+            );
+        },
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "auto-calibration failed \u{2014} run `sca calibrate` manually"
+            );
+        },
+    }
+}
+
 /// Clear the local index and sync snapshot.
+#[tracing::instrument(
+    name = "cli.clear.local",
+    skip_all,
+    fields(
+        correlation_id = tracing::field::Empty,
+        has_config_path = config_path.is_some(),
+        has_overrides = overrides_json.is_some(),
+    )
+)]
 pub fn run_clear_local(
     config_path: Option<&Path>,
     overrides_json: Option<&str>,
@@ -344,6 +611,7 @@ pub fn run_clear_local(
     ));
     let observability = observability_from_env();
     let ctx = RequestContext::new_request();
+    tracing::Span::current().record("correlation_id", ctx.correlation_id().as_str());
     let scoped_logger = scope_logger(observability.logger.as_ref(), &ctx);
     let scoped_telemetry = scope_telemetry(observability.telemetry.as_ref(), &ctx);
     let input = ClearIndexInput {
@@ -362,6 +630,101 @@ pub fn run_clear_local(
         };
         clear_index(&ctx, &deps, input).await
     })
+}
+
+/// Run BQ1 threshold calibration against the local vector index.
+///
+/// Loads the kernel and snapshot independently (bypassing `LocalVectorDb`)
+/// to build a `LocalCalibrationAdapter`, then runs the binary search
+/// calibration and persists the result to `.context/calibration.json`.
+#[tracing::instrument(
+    name = "cli.calibrate.local",
+    skip_all,
+    fields(
+        correlation_id = tracing::field::Empty,
+        has_config_path = config_path.is_some(),
+        has_overrides = overrides_json.is_some(),
+        target_recall = %params.target_recall,
+        num_queries = params.num_queries.value(),
+    )
+)]
+pub fn run_calibrate_local(
+    config_path: Option<&Path>,
+    overrides_json: Option<&str>,
+    codebase_root: &Path,
+    params: &CalibrationParams,
+) -> InfraResult<CalibrationState> {
+    let config_path = resolve_config_path(config_path, codebase_root);
+    let config = load_config(config_path.as_deref(), overrides_json)?;
+    let manifest = ensure_manifest(codebase_root, &config, false)?;
+    let observability = observability_from_env();
+    let ctx = RequestContext::new_request();
+    tracing::Span::current().record("correlation_id", ctx.correlation_id().as_str());
+    let scoped_logger = scope_logger(observability.logger.as_ref(), &ctx);
+    let scoped_telemetry = scope_telemetry(observability.telemetry.as_ref(), &ctx);
+
+    // Build kernel and resolve snapshot path.
+    let kernel_kind = config.vector_db.effective_vector_kernel();
+    let kernel = build_local_kernel(
+        kernel_kind,
+        config.vector_db.hnsw_search.as_ref(),
+        config.vector_db.dfrr_search.as_ref(),
+    )?;
+    let search_backend =
+        resolve_vector_search_backend(config.vector_db.effective_search_strategy());
+    let snapshot_path = vector_snapshot_path(
+        codebase_root,
+        &manifest.collection_name,
+        &manifest.snapshot_storage,
+    )
+    .ok_or_else(|| {
+        ErrorEnvelope::expected(
+            ErrorCode::new("calibration", "no_snapshot_storage"),
+            "snapshot storage is disabled; cannot calibrate without a local snapshot",
+        )
+    })?;
+
+    let params = params.clone();
+    let codebase_root = codebase_root.to_path_buf();
+    let state = run_async_with_ctx(ctx, move |ctx| async move {
+        // Load the snapshot into a VectorIndex directly for calibration.
+        let adapter = LocalCalibrationAdapter::load_from_snapshot_path(
+            kernel,
+            &snapshot_path,
+            search_backend,
+        )?;
+
+        let input = CalibrateBq1Input { params };
+        let deps = CalibrateBq1Deps {
+            calibration: Arc::new(adapter),
+            logger: scoped_logger,
+            telemetry: scoped_telemetry,
+        };
+        let output = calibrate_bq1(&ctx, &deps, &input).await?;
+        Ok(output.state)
+    })?;
+
+    // Persist the calibration state to `.context/calibration.json`.
+    write_calibration(&codebase_root, &state)?;
+    // Calibration invalidates prior EMA sidecars.
+    clear_ema_sidecars(&codebase_root)?;
+    let calibration_file = crate::cli_calibration::calibration_path(&codebase_root);
+    tracing::info!(
+        path = %calibration_file.display(),
+        threshold = format_args!("{:.4}", state.threshold),
+        "calibration state persisted"
+    );
+
+    Ok(state)
+}
+
+/// Map `VectorSearchStrategy` to the vector-crate `VectorSearchBackend`.
+const fn resolve_vector_search_backend(strategy: VectorSearchStrategy) -> VectorSearchBackend {
+    match strategy {
+        VectorSearchStrategy::F32Hnsw => VectorSearchBackend::F32Hnsw,
+        VectorSearchStrategy::U8Exact => VectorSearchBackend::ExperimentalU8Quantized,
+        VectorSearchStrategy::U8ThenF32Rerank => VectorSearchBackend::ExperimentalU8ThenF32Rerank,
+    }
 }
 
 fn build_reindex_input(
@@ -436,6 +799,17 @@ pub fn run_reindex_local(
 }
 
 /// Run a local reindex-by-change operation with optional progress and cancellation.
+#[tracing::instrument(
+    name = "cli.reindex.local_with_progress",
+    skip_all,
+    fields(
+        correlation_id = tracing::field::Empty,
+        has_config_path = config_path.is_some(),
+        has_overrides = overrides_json.is_some(),
+        has_progress_callback = on_progress.is_some(),
+        has_cancel_path = cancel_path.is_some(),
+    )
+)]
 pub fn run_reindex_local_with_progress(
     config_path: Option<&Path>,
     overrides_json: Option<&str>,
@@ -449,6 +823,7 @@ pub fn run_reindex_local_with_progress(
     let manifest = ensure_manifest(codebase_root, &config, false)?;
     let observability = observability_from_env();
     let ctx = RequestContext::new_request();
+    tracing::Span::current().record("correlation_id", ctx.correlation_id().as_str());
     let scoped_logger = scope_logger(observability.logger.as_ref(), &ctx);
     let scoped_telemetry = scope_telemetry(observability.telemetry.as_ref(), &ctx);
     let embedding = build_embedding_port_with_telemetry(
@@ -481,7 +856,15 @@ pub fn run_reindex_local_with_progress(
             logger: scoped_logger,
             telemetry: scoped_telemetry,
         };
+        let collection_name = input.collection_name.clone();
         let result = reindex_by_change(&ctx, &deps, input).await;
+        let result = match result {
+            Ok(output) => {
+                deps.vectordb.flush(&ctx, collection_name).await?;
+                Ok(output)
+            },
+            Err(err) => Err(err),
+        };
         finalize_cancel_watcher(cancel_handle).await?;
         result
     })
@@ -513,8 +896,7 @@ pub fn run_init_local(
         false
     };
 
-    let env = BackendEnv::default();
-    let validated = load_backend_config_from_path(Some(&config_path), None, &env)?;
+    let validated = load_backend_config_from_path(Some(&config_path), None, &BTreeMap::new())?;
 
     if let Some(existing) = read_manifest(codebase_root)? {
         validate_manifest_root(codebase_root, &existing)?;
@@ -615,15 +997,36 @@ fn load_config(
     config_path: Option<&Path>,
     overrides_json: Option<&str>,
 ) -> InfraResult<ValidatedBackendConfig> {
+    tracing::debug!(
+        has_config_path = config_path.is_some(),
+        has_overrides = overrides_json.is_some(),
+        "loading backend config"
+    );
     load_backend_config_std_env(config_path, overrides_json)
 }
 
 fn load_config_with_env(
     config_path: Option<&Path>,
     overrides_json: Option<&str>,
-) -> InfraResult<(ValidatedBackendConfig, BackendEnv)> {
-    let env = BackendEnv::from_std_env().map_err(ErrorEnvelope::from)?;
-    let config = load_backend_config_from_path(config_path, overrides_json, &env)?;
+) -> InfraResult<(ValidatedBackendConfig, RuntimeEnv)> {
+    tracing::debug!(
+        has_config_path = config_path.is_some(),
+        has_overrides = overrides_json.is_some(),
+        "loading backend config with environment overrides"
+    );
+    let env = load_runtime_env_std_env()?;
+    tracing::debug!(
+        has_embedding_provider_override = env.embedding_provider.is_some(),
+        has_vector_db_provider_override = env.vector_db_provider.is_some(),
+        has_embedding_api_key = env.embedding_api_key.is_some(),
+        has_openai_api_key = env.openai_api_key.is_some(),
+        has_gemini_api_key = env.gemini_api_key.is_some(),
+        has_voyage_api_key = env.voyage_api_key.is_some(),
+        has_vector_db_token = env.vector_db_token.is_some(),
+        has_vector_db_password = env.vector_db_password.is_some(),
+        "resolved backend environment override flags"
+    );
+    let config = load_backend_config_std_env(config_path, overrides_json)?;
     Ok((config, env))
 }
 
@@ -889,6 +1292,11 @@ fn observability_from_env() -> Observability {
     let telemetry_enabled = std::env::var(TELEMETRY_FORMAT_ENV)
         .ok()
         .map_or(log_enabled, |value| value.eq_ignore_ascii_case("json"));
+    tracing::debug!(
+        log_enabled = log_enabled,
+        telemetry_enabled = telemetry_enabled,
+        "resolved local observability flags from environment"
+    );
 
     if !log_enabled && !telemetry_enabled {
         return Observability {
@@ -897,21 +1305,30 @@ fn observability_from_env() -> Observability {
         };
     }
 
-    let sink: Arc<dyn semantic_code_adapters::log_sink::LogSink> = Arc::new(StderrLogSink);
+    let min_log_level = parse_log_level();
+    let sample_rate = parse_sample_rate();
+    let sink: Arc<dyn semantic_code_adapters::LogSink> = Arc::new(StderrLogSink);
     let logger: Option<Arc<dyn LoggerPort>> = if log_enabled {
         Some(Arc::new(
-            JsonLogger::new(Arc::clone(&sink)).with_min_level(parse_log_level()),
+            JsonLogger::new(Arc::clone(&sink)).with_min_level(min_log_level),
         ))
     } else {
         None
     };
     let telemetry: Option<Arc<dyn TelemetryPort>> = if telemetry_enabled {
         Some(Arc::new(
-            JsonTelemetry::new(Arc::clone(&sink)).with_span_sample_rate(parse_sample_rate()),
+            JsonTelemetry::new(Arc::clone(&sink)).with_span_sample_rate(sample_rate),
         ))
     } else {
         None
     };
+    tracing::debug!(
+        log_enabled = logger.is_some(),
+        telemetry_enabled = telemetry.is_some(),
+        ?min_log_level,
+        sample_rate = sample_rate,
+        "initialized local observability sinks"
+    );
 
     Observability { logger, telemetry }
 }

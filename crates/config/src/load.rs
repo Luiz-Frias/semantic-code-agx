@@ -3,14 +3,19 @@
 //! The loader is responsible for deterministic merge order and surfacing
 //! user-facing errors as typed `ErrorEnvelope`s.
 
+use crate::env::{BackendEnv, apply_env_overrides};
+use crate::schema::VectorDbIndexConfig;
 use crate::{
-    BackendConfig, BackendEnv, EmbeddingCacheDiskProvider, EmbeddingRoutingMode,
-    ValidatedBackendConfig, VectorDbIndexConfig, apply_env_overrides,
+    BackendConfig, DfrrSearchConfig, EmbeddingCacheDiskProvider, EmbeddingRoutingMode,
+    HnswSearchConfig, ValidatedBackendConfig, VectorKernelKind, VectorSearchStrategy,
+    VectorSnapshotFormat,
 };
 use semantic_code_domain::IndexMode;
 use semantic_code_shared::{ErrorCode, ErrorEnvelope};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::Path;
+use tracing::{debug, instrument};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigFormat {
@@ -21,60 +26,122 @@ enum ConfigFormat {
 /// Load the backend config from sources using a deterministic precedence order.
 ///
 /// Precedence (highest wins):
-/// - env overrides (`BackendEnv`)
+/// - env overrides (parsed from explicit env map)
 /// - overrides JSON (partial config)
 /// - config JSON (file content)
 /// - defaults (`BackendConfig::default()`)
+#[instrument(
+    name = "config.load.from_sources",
+    skip_all,
+    fields(
+        has_config_json = config_json.is_some(),
+        has_overrides_json = overrides_json.is_some()
+    )
+)]
 pub fn load_backend_config_from_sources(
+    config_json: Option<&str>,
+    overrides_json: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Result<ValidatedBackendConfig, ErrorEnvelope> {
+    let parsed_env = BackendEnv::from_map(env).map_err(ErrorEnvelope::from)?;
+    load_backend_config_from_sources_with_env(config_json, overrides_json, &parsed_env)
+}
+
+fn load_backend_config_from_sources_with_env(
     config_json: Option<&str>,
     overrides_json: Option<&str>,
     env: &BackendEnv,
 ) -> Result<ValidatedBackendConfig, ErrorEnvelope> {
+    debug!(
+        has_config_json = config_json.is_some(),
+        has_overrides_json = overrides_json.is_some(),
+        "loading backend config from inline sources"
+    );
     let mut config = match config_json {
         None => BackendConfig::default(),
         Some(input) => parse_config_unvalidated(input, ConfigFormat::Json)?,
     };
 
     if let Some(input) = overrides_json {
+        debug!("applying config override JSON");
         let overrides = parse_overrides_json(input)?;
         apply_overrides(&mut config, &overrides);
     }
 
     // env is applied last and also validates/normalizes the resulting config.
+    debug!("applying environment overrides and validating config");
     apply_env_overrides(config, env)
 }
 
 /// Load the backend config from an optional file path.
+#[instrument(
+    name = "config.load.from_path",
+    skip_all,
+    fields(
+        has_config_path = config_path.is_some(),
+        has_overrides_json = overrides_json.is_some()
+    )
+)]
 pub fn load_backend_config_from_path(
+    config_path: Option<&Path>,
+    overrides_json: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Result<ValidatedBackendConfig, ErrorEnvelope> {
+    let parsed_env = BackendEnv::from_map(env).map_err(ErrorEnvelope::from)?;
+    load_backend_config_from_path_with_env(config_path, overrides_json, &parsed_env)
+}
+
+fn load_backend_config_from_path_with_env(
     config_path: Option<&Path>,
     overrides_json: Option<&str>,
     env: &BackendEnv,
 ) -> Result<ValidatedBackendConfig, ErrorEnvelope> {
+    debug!(
+        has_config_path = config_path.is_some(),
+        has_overrides_json = overrides_json.is_some(),
+        "loading backend config from file path"
+    );
     let mut config = match config_path {
         None => BackendConfig::default(),
         Some(path) => {
             let config_text = read_config_file(path)?;
             let format = detect_config_format(path)?;
+            debug!(format = ?format, path = %path.display(), "detected config file format");
             parse_config_unvalidated(&config_text, format)?
         },
     };
 
     if let Some(input) = overrides_json {
+        debug!("applying config override JSON");
         let overrides = parse_overrides_json(input)?;
         apply_overrides(&mut config, &overrides);
     }
 
     // env is applied last and also validates/normalizes the resulting config.
+    debug!("applying environment overrides and validating config");
     apply_env_overrides(config, env)
 }
 
 /// Load the backend config from std env and an optional file path.
+#[instrument(
+    name = "config.load.from_std_env",
+    skip_all,
+    fields(
+        has_config_path = config_path.is_some(),
+        has_overrides_json = overrides_json.is_some()
+    )
+)]
 pub fn load_backend_config_std_env(
     config_path: Option<&Path>,
     overrides_json: Option<&str>,
 ) -> Result<ValidatedBackendConfig, ErrorEnvelope> {
+    debug!(
+        has_config_path = config_path.is_some(),
+        has_overrides_json = overrides_json.is_some(),
+        "loading backend config using process environment"
+    );
     let env = BackendEnv::from_std_env().map_err(ErrorEnvelope::from)?;
-    load_backend_config_from_path(config_path, overrides_json, &env)
+    load_backend_config_from_path_with_env(config_path, overrides_json, &env)
 }
 
 /// Serialize the config as deterministic pretty JSON (with trailing newline).
@@ -107,6 +174,11 @@ fn parse_config_unvalidated(
     input: &str,
     format: ConfigFormat,
 ) -> Result<BackendConfig, ErrorEnvelope> {
+    debug!(
+        format = ?format,
+        bytes = input.len(),
+        "parsing backend config payload"
+    );
     match format {
         ConfigFormat::Json => serde_json::from_str(input).map_err(|error| {
             ErrorEnvelope::expected(
@@ -126,6 +198,7 @@ fn parse_config_unvalidated(
 }
 
 fn parse_overrides_json(input: &str) -> Result<BackendConfigOverrides, ErrorEnvelope> {
+    debug!(bytes = input.len(), "parsing backend override payload");
     serde_json::from_str(input).map_err(|error| {
         ErrorEnvelope::expected(
             ErrorCode::new("config", "invalid_json"),
@@ -136,6 +209,7 @@ fn parse_overrides_json(input: &str) -> Result<BackendConfigOverrides, ErrorEnve
 }
 
 fn read_config_file(path: &Path) -> Result<String, ErrorEnvelope> {
+    debug!(path = %path.display(), "reading backend config file");
     std::fs::read_to_string(path).map_err(|error| {
         let code = match error.kind() {
             std::io::ErrorKind::NotFound => ErrorCode::new("config", "config_file_not_found"),
@@ -155,6 +229,11 @@ fn detect_config_format(path: &Path) -> Result<ConfigFormat, ErrorEnvelope> {
         .extension()
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase);
+    debug!(
+        path = %path.display(),
+        extension = ext.as_deref().unwrap_or("<none>"),
+        "resolving backend config format from path extension"
+    );
     match ext.as_deref() {
         None | Some("json") => Ok(ConfigFormat::Json),
         Some("toml") => Ok(ConfigFormat::Toml),
@@ -340,6 +419,24 @@ struct VectorDbConfigOverrides {
     index: Option<VectorDbIndexConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     batch_size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_format: Option<VectorSnapshotFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_max_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vector_kernel: Option<VectorKernelKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_strategy: Option<VectorSearchStrategy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    experimental_u8_search: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    force_reindex_on_kernel_change: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_search_metrics: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hnsw_search: Option<HnswSearchConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dfrr_search: Option<DfrrSearchConfig>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -356,6 +453,14 @@ struct SyncConfigOverrides {
 }
 
 fn apply_overrides(config: &mut BackendConfig, overrides: &BackendConfigOverrides) {
+    debug!(
+        has_version = overrides.version.is_some(),
+        has_core = overrides.core != CoreConfigOverrides::default(),
+        has_embedding = overrides.embedding != EmbeddingConfigOverrides::default(),
+        has_vector_db = overrides.vector_db != VectorDbConfigOverrides::default(),
+        has_sync = overrides.sync != SyncConfigOverrides::default(),
+        "merging backend config overrides"
+    );
     if let Some(version) = overrides.version {
         config.version = version;
     }
@@ -605,6 +710,38 @@ fn apply_vector_db_overrides(config: &mut BackendConfig, overrides: &VectorDbCon
         &mut mapper.config.vector_db.batch_size,
         overrides.batch_size,
     );
+    OverrideMapper::set_opt_snapshot_format(
+        &mut mapper.config.vector_db.snapshot_format,
+        overrides.snapshot_format,
+    );
+    OverrideMapper::set_opt_u64(
+        &mut mapper.config.vector_db.snapshot_max_bytes,
+        overrides.snapshot_max_bytes,
+    );
+    if overrides.vector_kernel.is_some() {
+        mapper.config.vector_db.vector_kernel = overrides.vector_kernel;
+    }
+    if overrides.search_strategy.is_some() {
+        mapper.config.vector_db.search_strategy = overrides.search_strategy;
+    }
+    OverrideMapper::set_bool(
+        &mut mapper.config.vector_db.experimental_u8_search,
+        overrides.experimental_u8_search,
+    );
+    OverrideMapper::set_bool(
+        &mut mapper.config.vector_db.force_reindex_on_kernel_change,
+        overrides.force_reindex_on_kernel_change,
+    );
+    OverrideMapper::set_bool(
+        &mut mapper.config.vector_db.enable_search_metrics,
+        overrides.enable_search_metrics,
+    );
+    if overrides.hnsw_search.is_some() {
+        mapper.config.vector_db.hnsw_search = overrides.hnsw_search;
+    }
+    if overrides.dfrr_search.is_some() {
+        mapper.config.vector_db.dfrr_search = overrides.dfrr_search;
+    }
 }
 
 fn apply_sync_overrides(config: &mut BackendConfig, overrides: &SyncConfigOverrides) {
@@ -657,7 +794,22 @@ impl<'a> OverrideMapper<'a> {
         }
     }
 
+    const fn set_opt_u64(field: &mut Option<u64>, value: Option<u64>) {
+        if value.is_some() {
+            *field = value;
+        }
+    }
+
     const fn set_opt_index_mode(field: &mut IndexMode, value: Option<IndexMode>) {
+        if let Some(value) = value {
+            *field = value;
+        }
+    }
+
+    const fn set_opt_snapshot_format(
+        field: &mut VectorSnapshotFormat,
+        value: Option<VectorSnapshotFormat>,
+    ) {
         if let Some(value) = value {
             *field = value;
         }
@@ -696,8 +848,11 @@ mod tests {
             ..BackendEnv::default()
         };
 
-        let config =
-            load_backend_config_from_sources(Some(config_json), Some(overrides_json), &env)?;
+        let config = load_backend_config_from_sources_with_env(
+            Some(config_json),
+            Some(overrides_json),
+            &env,
+        )?;
         assert_eq!(config.core.timeout_ms, 60000);
         Ok(())
     }
@@ -705,10 +860,66 @@ mod tests {
     #[test]
     fn serialization_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
         let env = BackendEnv::default();
-        let config = load_backend_config_from_sources(None, None, &env)?;
+        let config = load_backend_config_from_sources_with_env(None, None, &env)?;
         let first = to_pretty_json(&config)?;
         let second = to_pretty_json(&config)?;
         assert_eq!(first, second);
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_snapshot_max_bytes_override_applies() -> Result<(), Box<dyn std::error::Error>> {
+        let overrides_json = r#"{
+          "vectorDb": { "snapshotMaxBytes": 1048576 }
+        }"#;
+        let env = BackendEnv::default();
+        let config = load_backend_config_from_sources_with_env(None, Some(overrides_json), &env)?;
+        assert_eq!(config.vector_db.snapshot_max_bytes, Some(1_048_576));
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_vector_kernel_override_applies() -> Result<(), Box<dyn std::error::Error>> {
+        let overrides_json = r#"{
+          "vectorDb": { "vectorKernel": "dfrr" }
+        }"#;
+        let env = BackendEnv::default();
+        let config = load_backend_config_from_sources_with_env(None, Some(overrides_json), &env)?;
+        assert_eq!(config.vector_db.vector_kernel, Some(VectorKernelKind::Dfrr));
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_force_reindex_override_applies() -> Result<(), Box<dyn std::error::Error>> {
+        let overrides_json = r#"{
+          "vectorDb": { "forceReindexOnKernelChange": true }
+        }"#;
+        let env = BackendEnv::default();
+        let config = load_backend_config_from_sources_with_env(None, Some(overrides_json), &env)?;
+        assert!(config.vector_db.force_reindex_on_kernel_change);
+        Ok(())
+    }
+
+    #[test]
+    fn env_vector_kernel_and_force_reindex_overrides_take_precedence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let overrides_json = r#"{
+          "vectorDb": {
+            "vectorKernel": "dfrr",
+            "forceReindexOnKernelChange": false
+          }
+        }"#;
+        let env = BackendEnv {
+            vector_db_vector_kernel: Some(VectorKernelKind::HnswRs),
+            vector_db_force_reindex_on_kernel_change: Some(true),
+            ..BackendEnv::default()
+        };
+        let config = load_backend_config_from_sources_with_env(None, Some(overrides_json), &env)?;
+        assert_eq!(
+            config.vector_db.vector_kernel,
+            Some(VectorKernelKind::HnswRs)
+        );
+        assert!(config.vector_db.force_reindex_on_kernel_change);
         Ok(())
     }
 
@@ -725,7 +936,7 @@ mod tests {
             ..BackendEnv::default()
         };
 
-        let config = load_backend_config_from_sources(None, None, &env)?;
+        let config = load_backend_config_from_sources_with_env(None, None, &env)?;
 
         // Env values should be applied
         assert_eq!(config.core.timeout_ms, 30000);
@@ -753,7 +964,7 @@ mod tests {
 
         // This should succeed because env overrides the invalid config value
         // before validation runs
-        let config = load_backend_config_from_sources(Some(config_json), None, &env)?;
+        let config = load_backend_config_from_sources_with_env(Some(config_json), None, &env)?;
         assert_eq!(config.core.timeout_ms, 30000);
         Ok(())
     }
@@ -771,8 +982,11 @@ mod tests {
 
         let env = BackendEnv::default();
 
-        let result =
-            load_backend_config_from_sources(Some(config_json), Some(overrides_json), &env);
+        let result = load_backend_config_from_sources_with_env(
+            Some(config_json),
+            Some(overrides_json),
+            &env,
+        );
         assert!(result.is_err());
 
         let error = result
@@ -800,7 +1014,7 @@ mod tests {
             ..BackendEnv::default()
         };
 
-        let result = load_backend_config_from_sources(Some(config_json), None, &env);
+        let result = load_backend_config_from_sources_with_env(Some(config_json), None, &env);
         assert!(result.is_err());
 
         let error = result

@@ -3,10 +3,13 @@
 use crate::commands::jobs::{format_job_status, spawn_job_runner};
 use crate::error::{CliError, ExitCode};
 use crate::format::OutputMode;
+use crate::vector_kernel::{
+    VectorKernelMetadata, resolve_vector_kernel_metadata_std_env, warn_if_experimental,
+};
 use crate::{CliOutput, format_error_output, infra_exit_code};
-use semantic_code_config::{IndexRequestDto, validate_index_request};
 use semantic_code_facade::{
-    IndexCodebaseOutput, IndexCodebaseStatus, JobKind, JobRequest, create_job, run_index_local,
+    IndexCodebaseOutput, IndexCodebaseStatus, JobKind, JobRequest, create_job,
+    ensure_storage_headroom_local, run_index_local, validate_index_request_for_root,
 };
 use std::path::Path;
 
@@ -18,16 +21,26 @@ pub fn run_index(
     codebase_root: &Path,
     init_if_missing: bool,
     background: bool,
+    danger_close_storage: bool,
 ) -> Result<CliOutput, CliError> {
-    let request = IndexRequestDto {
-        codebase_root: codebase_root.to_string_lossy().to_string(),
-        collection_name: None,
-        force_reindex: None,
-    };
-    let request = match validate_index_request(&request) {
+    let request = match validate_index_request_for_root(codebase_root) {
         Ok(request) => request,
         Err(error) => return Ok(format_error_output(mode, &error, infra_exit_code(&error))),
     };
+    let vector_kernel = match resolve_vector_kernel_metadata_std_env(config_path, overrides_json) {
+        Ok(metadata) => metadata,
+        Err(error) => return Ok(format_error_output(mode, &error, infra_exit_code(&error))),
+    };
+    warn_if_experimental(vector_kernel);
+
+    if let Err(error) = ensure_storage_headroom_local(
+        config_path,
+        overrides_json,
+        codebase_root,
+        danger_close_storage,
+    ) {
+        return Ok(format_error_output(mode, &error, infra_exit_code(&error)));
+    }
 
     if background {
         let job_request = match JobRequest::new(
@@ -45,11 +58,11 @@ pub fn run_index(
             Err(error) => return Ok(format_error_output(mode, &error, infra_exit_code(&error))),
         };
         spawn_job_runner(&status.id, codebase_root)?;
-        return format_job_status(mode, &status);
+        return format_job_status(mode, &status, Some(vector_kernel));
     }
 
     match run_index_local(config_path, overrides_json, &request, init_if_missing) {
-        Ok(output) => format_index_output(mode, &output),
+        Ok(output) => format_index_output(mode, &output, vector_kernel),
         Err(error) => Ok(format_error_output(mode, &error, infra_exit_code(&error))),
     }
 }
@@ -57,6 +70,7 @@ pub fn run_index(
 fn format_index_output(
     mode: OutputMode,
     output: &IndexCodebaseOutput,
+    vector_kernel: VectorKernelMetadata,
 ) -> Result<CliOutput, CliError> {
     let stdout = if mode.is_ndjson() {
         let payload = serde_json::json!({
@@ -66,12 +80,13 @@ fn format_index_output(
             "totalChunks": output.total_chunks,
             "indexStatus": index_status_label(output.status),
             "stageStats": stage_stats_json(output),
+            "vectorKernel": vector_kernel.as_json(),
         });
         let mut out = serde_json::to_string(&payload)?;
         out.push('\n');
         out
     } else if mode.is_json() {
-        format_index_json(output)?
+        format_index_json(output, vector_kernel)?
     } else {
         format_index_text(output)
     };
@@ -83,13 +98,17 @@ fn format_index_output(
     })
 }
 
-fn format_index_json(output: &IndexCodebaseOutput) -> Result<String, CliError> {
+fn format_index_json(
+    output: &IndexCodebaseOutput,
+    vector_kernel: VectorKernelMetadata,
+) -> Result<String, CliError> {
     let payload = serde_json::json!({
         "status": "ok",
         "indexedFiles": output.indexed_files,
         "totalChunks": output.total_chunks,
         "indexStatus": index_status_label(output.status),
         "stageStats": stage_stats_json(output),
+        "vectorKernel": vector_kernel.as_json(),
     });
     let mut out = serde_json::to_string_pretty(&payload)?;
     out.push('\n');

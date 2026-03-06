@@ -190,7 +190,7 @@ pub fn emit_progress(
     });
 }
 
-pub fn progress_percentage(current: u64, total: u64) -> u8 {
+fn progress_percentage(current: u64, total: u64) -> u8 {
     if total == 0 {
         return 100;
     }

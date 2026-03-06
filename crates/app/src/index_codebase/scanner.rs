@@ -8,7 +8,23 @@ use std::collections::{HashSet, VecDeque};
 // TODO: refactor repeated optional logger/telemetry checks with a helper mapper.
 const CONTEXT_IGNORE_FILE: &str = ".contextignore";
 
-pub async fn load_index_files(
+#[tracing::instrument(
+    name = "app.index.scan",
+    skip_all,
+    fields(
+        has_file_list = input.file_list.is_some(),
+        has_supported_extensions = input
+            .supported_extensions
+            .as_ref()
+            .is_some_and(|values| !values.is_empty()),
+        has_ignore_patterns = input
+            .ignore_patterns
+            .as_ref()
+            .is_some_and(|values| !values.is_empty()),
+        max_files = input.max_files.map(std::num::NonZeroUsize::get),
+    )
+)]
+pub(super) async fn load_index_files(
     ctx: &RequestContext,
     deps: &IndexCodebaseDeps,
     input: &IndexCodebaseInput,
@@ -25,10 +41,12 @@ pub async fn load_index_files(
         scan_code_files(ctx, deps, input, &ignore_patterns).await?
     };
 
-    filter_files(ctx, deps, raw_files, input, &ignore_patterns)
+    let files = filter_files(ctx, deps, raw_files, input, &ignore_patterns)?;
+    tracing::debug!(file_count = files.len(), "index scan finalized file list");
+    Ok(files)
 }
 
-pub async fn scan_code_files(
+async fn scan_code_files(
     ctx: &RequestContext,
     deps: &IndexCodebaseDeps,
     input: &IndexCodebaseInput,
@@ -113,7 +131,7 @@ pub async fn scan_code_files(
     Ok(out)
 }
 
-pub fn filter_files(
+fn filter_files(
     ctx: &RequestContext,
     deps: &IndexCodebaseDeps,
     raw_files: Vec<Box<str>>,
@@ -157,7 +175,7 @@ pub fn filter_files(
     Ok(files)
 }
 
-pub async fn load_ignore_patterns(
+async fn load_ignore_patterns(
     ctx: &RequestContext,
     deps: &IndexCodebaseDeps,
     input: &IndexCodebaseInput,
@@ -222,7 +240,7 @@ fn normalize_extensions(values: Option<&Vec<Box<str>>>) -> HashSet<Box<str>> {
     out
 }
 
-pub fn normalize_relative_path(path: &str) -> String {
+fn normalize_relative_path(path: &str) -> String {
     let mut out = String::new();
     let mut prev_slash = false;
     for ch in path.chars() {
@@ -241,7 +259,7 @@ pub fn normalize_relative_path(path: &str) -> String {
     if out.is_empty() { ".".to_string() } else { out }
 }
 
-pub fn file_extension_of(path: &str) -> Option<Box<str>> {
+pub(super) fn file_extension_of(path: &str) -> Option<Box<str>> {
     let file = path.rsplit('/').next().unwrap_or(path);
     let (_, ext) = file.rsplit_once('.')?;
     if ext.is_empty() {

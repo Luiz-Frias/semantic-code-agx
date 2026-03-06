@@ -27,3 +27,25 @@ impl SnapshotStorageMode {
         }
     }
 }
+
+/// Snapshot format used by the local vector DB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VectorSnapshotFormat {
+    /// Legacy JSON snapshot (`<collection>.json`).
+    #[default]
+    V1,
+    /// Binary companion snapshot (`snapshot.meta` + `vectors.u8.bin`).
+    V2,
+}
+
+impl VectorSnapshotFormat {
+    /// Canonical string representation used in config/env surfaces.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+        }
+    }
+}

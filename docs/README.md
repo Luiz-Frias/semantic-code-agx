@@ -1,6 +1,6 @@
 # Documentation
 
-Welcome to the semantic-code-agx documentation. This guide will help you navigate the project's documentation and find what you need.
+Welcome to the semantic-code-agents-rs documentation. This guide will help you navigate the project's documentation and find what you need.
 
 ## Quick Navigation
 
@@ -44,6 +44,8 @@ Welcome to the semantic-code-agx documentation. This guide will help you navigat
   - [Filesystem Adapter](./internals/adapters/filesystem.md)
   - [Code Splitter](./internals/splitter.md)
   - [Vector Kernel](./internals/vector-kernel.md)
+  - [Vector Snapshot Format v2](./vector-snapshot-format.md)
+  - [mmap Safety Invariants](./mmap-safety.md)
   - [Resilience Patterns](./internals/resilience.md)
   - [Concurrency](./internals/concurrency.md)
   - [Request Validation](./internals/validation.md)

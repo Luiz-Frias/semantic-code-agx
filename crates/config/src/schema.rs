@@ -5,7 +5,7 @@
 //! - Validation is manual and returns typed errors mapped to `ErrorEnvelope`.
 //! - Normalization enforces stable ordering for list fields.
 
-use crate::storage::SnapshotStorageMode;
+use crate::storage::{SnapshotStorageMode, VectorSnapshotFormat};
 use semantic_code_domain::IndexMode;
 use semantic_code_shared::{BoundedU32, BoundedU64, ErrorCode, ErrorEnvelope};
 use serde::{Deserialize, Serialize, de};
@@ -86,6 +86,8 @@ const VECTOR_DB_INDEX_TIMEOUT_MIN_MS: u64 = 1_000;
 const VECTOR_DB_INDEX_TIMEOUT_MAX_MS: u64 = 3_600_000;
 const VECTOR_DB_BATCH_SIZE_MIN: u32 = 1;
 const VECTOR_DB_BATCH_SIZE_MAX: u32 = 16_384;
+const VECTOR_DB_SNAPSHOT_MAX_BYTES_MIN: u64 = 1;
+const VECTOR_DB_SNAPSHOT_MAX_BYTES_MAX: u64 = 100_000_000_000;
 const VECTOR_DB_INDEX_PARAMS_MAX: usize = 128;
 
 const SYNC_MAX_FILES_MIN: u32 = 1;
@@ -318,23 +320,12 @@ impl ConfigLimits {
 }
 
 /// Parse a backend config from a JSON string, applying validation and normalization.
-pub fn parse_backend_config_json(input: &str) -> Result<ValidatedBackendConfig, ErrorEnvelope> {
+#[cfg(test)]
+fn parse_backend_config_json(input: &str) -> Result<ValidatedBackendConfig, ErrorEnvelope> {
     let config: BackendConfig = serde_json::from_str(input).map_err(|error| {
         ErrorEnvelope::expected(
             ErrorCode::new("config", "invalid_json"),
             format!("invalid config JSON: {error}"),
-        )
-    })?;
-
-    config.validate_and_normalize().map_err(Into::into)
-}
-
-/// Parse a backend config from a TOML string, applying validation and normalization.
-pub fn parse_backend_config_toml(input: &str) -> Result<ValidatedBackendConfig, ErrorEnvelope> {
-    let config: BackendConfig = toml::from_str(input).map_err(|error| {
-        ErrorEnvelope::expected(
-            ErrorCode::new("config", "invalid_toml"),
-            format!("invalid config TOML: {error}"),
         )
     })?;
 
@@ -954,9 +945,248 @@ pub enum EmbeddingCacheDiskProvider {
     Mssql,
 }
 
+/// Local vector search strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum VectorSearchStrategy {
+    /// Default local path backed by f32 HNSW.
+    #[default]
+    F32Hnsw,
+    /// Experimental exact search on quantized (`u8`) vectors.
+    U8Exact,
+    /// Experimental two-stage path (`u8` candidate generation + `f32` rerank).
+    U8ThenF32Rerank,
+}
+
+/// Local vector kernel implementation family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum VectorKernelKind {
+    /// Built-in HNSW kernel backed by `hnsw_rs`.
+    #[default]
+    HnswRs,
+    /// Experimental DFRR kernel.
+    Dfrr,
+    /// Brute-force exact nearest-neighbor scan for benchmark ground truth.
+    FlatScan,
+}
+
+/// Query-time cluster routing strategy for DFRR rank lookups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DfrrQueryStrategy {
+    /// Keep a fixed cluster for rank lookups.
+    #[default]
+    Static,
+    /// Resolve query cluster from the nearest centroid.
+    NearestCentroid,
+    /// Probe multiple nearest centroids and choose a sufficiently sized cluster.
+    NearestCentroidMultiProbe,
+}
+
+/// Ratio threshold for DFRR BQ1 Hamming prefilter.
+///
+/// Serialized as a JSON number in `[0.0, 1.0]` (validated downstream).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DfrrBq1Threshold(f32);
+
+impl DfrrBq1Threshold {
+    /// Create a BQ1 threshold wrapper.
+    #[must_use]
+    pub const fn new(value: f32) -> Self {
+        Self(value)
+    }
+
+    /// Return the wrapped floating-point ratio.
+    #[must_use]
+    pub const fn into_inner(self) -> f32 {
+        self.0
+    }
+}
+
+impl PartialEq for DfrrBq1Threshold {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for DfrrBq1Threshold {}
+
+/// HNSW kernel search tuning parameters.
+///
+/// Controls the search-time behavior of the built-in HNSW kernel.
+/// Only used when `vectorKernel = "hnsw-rs"` (the default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HnswSearchConfig {
+    /// Beam width for HNSW graph traversal (default: 200).
+    ///
+    /// Higher values improve recall at the cost of latency.
+    /// This is the **actual** `ef_search` passed to the HNSW library —
+    /// no hidden multipliers are applied.
+    #[serde(default = "default_hnsw_ef_search")]
+    pub ef_search: u32,
+}
+
+impl Default for HnswSearchConfig {
+    fn default() -> Self {
+        Self {
+            ef_search: default_hnsw_ef_search(),
+        }
+    }
+}
+
+const fn default_hnsw_ef_search() -> u32 {
+    200
+}
+
+/// DFRR kernel search tuning parameters.
+///
+/// Controls the search-time behavior of the DFRR kernel. These parameters
+/// are only used when `vectorKernel = "dfrr"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "configuration struct — bools represent independent toggles, not combinatorial state"
+)]
+pub struct DfrrSearchConfig {
+    /// Beam width for DFRR base-level bounded refine (default: 50).
+    #[serde(default = "default_dfrr_ef_search")]
+    pub ef_search: u32,
+    /// Maximum pivots per expansion (default: 4).
+    #[serde(default = "default_dfrr_pivot_count")]
+    pub pivot_count: usize,
+    /// Base-level multiplier for pivot selection (default: 2).
+    #[serde(default = "default_dfrr_base_level_pivot_multiplier")]
+    pub base_level_pivot_multiplier: usize,
+    /// Number of rank-percentile buckets in the frontier (default: 8).
+    #[serde(default = "default_dfrr_bucket_count")]
+    pub bucket_count: usize,
+    /// Candidates to pull per frontier bucket pull (default: 4).
+    #[serde(default = "default_dfrr_pull_size")]
+    pub pull_size: usize,
+    /// Bucket split threshold for frontier rebalancing (default: 64).
+    #[serde(default = "default_dfrr_split_threshold")]
+    pub split_threshold: usize,
+    /// Enable adaptive frontier bucket boundaries (default: true).
+    #[serde(default = "default_dfrr_adaptive_bucket_widths")]
+    pub adaptive_bucket_widths: bool,
+    /// Refine bucket boundaries after the first pull (default: true).
+    #[serde(default = "default_dfrr_refine_after_first_pull")]
+    pub refine_after_first_pull: bool,
+    /// Maximum expansion iterations per search (default: 256).
+    #[serde(default = "default_dfrr_max_iterations")]
+    pub max_iterations: usize,
+    /// Re-seed frontier when exhausted before enough candidates are found (default: true).
+    #[serde(default = "default_dfrr_enable_exhaustion_guard")]
+    pub enable_exhaustion_guard: bool,
+    /// Number of clusters built for rank routing (default: 8).
+    #[serde(default = "default_dfrr_cluster_count")]
+    pub cluster_count: usize,
+    /// Query-time cluster routing strategy (default: nearest-centroid).
+    #[serde(default)]
+    pub query_strategy: DfrrQueryStrategy,
+    /// Probe count for `nearest-centroid-multi-probe` routing (default: 3).
+    #[serde(default = "default_dfrr_query_probe_count")]
+    pub query_probe_count: usize,
+    /// Minimum cluster size for `nearest-centroid-multi-probe` (default: 64).
+    #[serde(default = "default_dfrr_query_min_cluster_size")]
+    pub query_min_cluster_size: usize,
+    /// Optional BQ1 Hamming threshold ratio in `[0.0, 1.0]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bq1_threshold: Option<DfrrBq1Threshold>,
+    /// Automatically run BQ1 calibration after indexing completes (default: false).
+    ///
+    /// When `true` and no `.context/calibration.json` exists, `sca index`
+    /// triggers calibration with default parameters after indexing.
+    #[serde(default)]
+    pub auto_calibrate: bool,
+}
+
+impl Default for DfrrSearchConfig {
+    fn default() -> Self {
+        Self {
+            ef_search: default_dfrr_ef_search(),
+            pivot_count: default_dfrr_pivot_count(),
+            base_level_pivot_multiplier: default_dfrr_base_level_pivot_multiplier(),
+            bucket_count: default_dfrr_bucket_count(),
+            pull_size: default_dfrr_pull_size(),
+            split_threshold: default_dfrr_split_threshold(),
+            adaptive_bucket_widths: default_dfrr_adaptive_bucket_widths(),
+            refine_after_first_pull: default_dfrr_refine_after_first_pull(),
+            max_iterations: default_dfrr_max_iterations(),
+            enable_exhaustion_guard: default_dfrr_enable_exhaustion_guard(),
+            cluster_count: default_dfrr_cluster_count(),
+            query_strategy: DfrrQueryStrategy::default(),
+            query_probe_count: default_dfrr_query_probe_count(),
+            query_min_cluster_size: default_dfrr_query_min_cluster_size(),
+            bq1_threshold: None,
+            auto_calibrate: false,
+        }
+    }
+}
+
+const fn default_dfrr_ef_search() -> u32 {
+    50
+}
+
+const fn default_dfrr_pivot_count() -> usize {
+    4
+}
+
+const fn default_dfrr_base_level_pivot_multiplier() -> usize {
+    2
+}
+
+const fn default_dfrr_bucket_count() -> usize {
+    8
+}
+
+const fn default_dfrr_pull_size() -> usize {
+    4
+}
+
+const fn default_dfrr_split_threshold() -> usize {
+    64
+}
+
+const fn default_dfrr_adaptive_bucket_widths() -> bool {
+    true
+}
+
+const fn default_dfrr_refine_after_first_pull() -> bool {
+    true
+}
+
+const fn default_dfrr_max_iterations() -> usize {
+    256
+}
+
+const fn default_dfrr_enable_exhaustion_guard() -> bool {
+    true
+}
+
+const fn default_dfrr_cluster_count() -> usize {
+    8
+}
+
+const fn default_dfrr_query_probe_count() -> usize {
+    3
+}
+
+const fn default_dfrr_query_min_cluster_size() -> usize {
+    64
+}
+
 /// Vector DB configuration (local/external selection is handled in later milestones).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "config struct: boolean flags are the natural representation for toggles"
+)]
 pub struct VectorDbConfig {
     /// Optional provider identifier (e.g. `local`, `milvus`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -993,6 +1223,36 @@ pub struct VectorDbConfig {
     pub batch_size: u32,
     /// Snapshot persistence mode for local vector DBs.
     pub snapshot_storage: SnapshotStorageMode,
+    /// Snapshot format used by the local vector DB.
+    pub snapshot_format: VectorSnapshotFormat,
+    /// Optional max bytes allowed per local snapshot write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_max_bytes: Option<u64>,
+    /// Explicit local kernel family override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_kernel: Option<VectorKernelKind>,
+    /// Explicit local search strategy override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_strategy: Option<VectorSearchStrategy>,
+    /// Enable experimental local search over quantized (`u8`) vectors.
+    ///
+    /// Legacy compatibility switch. When `searchStrategy` is not set and this
+    /// flag is enabled, the effective strategy is `u8-then-f32-rerank`.
+    pub experimental_u8_search: bool,
+    /// Force full local reindex when configured kernel differs from snapshot metadata.
+    pub force_reindex_on_kernel_change: bool,
+    /// Enable detailed search metrics collection during vector searches.
+    ///
+    /// When enabled, structured metrics (expansions, pulls, rank-pruned count,
+    /// peak bucket utilization, splits, levels traversed) are collected and
+    /// emitted via tracing spans for each search operation.
+    pub enable_search_metrics: bool,
+    /// HNSW kernel search tuning (only used when `vectorKernel = "hnsw-rs"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hnsw_search: Option<HnswSearchConfig>,
+    /// DFRR kernel search tuning (only used when `vectorKernel = "dfrr"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dfrr_search: Option<DfrrSearchConfig>,
 }
 
 impl Default for VectorDbConfig {
@@ -1012,6 +1272,15 @@ impl Default for VectorDbConfig {
             index: VectorDbIndexConfig::default(),
             batch_size: 128,
             snapshot_storage: SnapshotStorageMode::default(),
+            snapshot_format: VectorSnapshotFormat::default(),
+            snapshot_max_bytes: None,
+            vector_kernel: None,
+            search_strategy: None,
+            experimental_u8_search: false,
+            force_reindex_on_kernel_change: false,
+            enable_search_metrics: false,
+            hnsw_search: None,
+            dfrr_search: None,
         }
     }
 }
@@ -1128,9 +1397,39 @@ impl VectorDbConfig {
             VECTOR_DB_BATCH_SIZE_MIN,
             VECTOR_DB_BATCH_SIZE_MAX,
         )?;
+        if let Some(snapshot_max_bytes) = self.snapshot_max_bytes {
+            validate_limit_u64(
+                "vectorDb",
+                "snapshotMaxBytes",
+                snapshot_max_bytes,
+                VECTOR_DB_SNAPSHOT_MAX_BYTES_MIN,
+                VECTOR_DB_SNAPSHOT_MAX_BYTES_MAX,
+            )?;
+        }
         validate_snapshot_storage("vectorDb", "snapshotStorage", &self.snapshot_storage)?;
         self.index.validate()?;
         Ok(())
+    }
+
+    /// Resolve the effective local search strategy.
+    #[must_use]
+    pub const fn effective_search_strategy(&self) -> VectorSearchStrategy {
+        if let Some(strategy) = self.search_strategy {
+            return strategy;
+        }
+        if self.experimental_u8_search {
+            return VectorSearchStrategy::U8ThenF32Rerank;
+        }
+        VectorSearchStrategy::F32Hnsw
+    }
+
+    /// Resolve the effective local kernel family.
+    #[must_use]
+    pub const fn effective_vector_kernel(&self) -> VectorKernelKind {
+        if let Some(kernel) = self.vector_kernel {
+            return kernel;
+        }
+        VectorKernelKind::HnswRs
     }
 }
 
@@ -1839,6 +2138,8 @@ fn default_allowed_extensions() -> Vec<Box<str>> {
         "c".into(),
         "cpp".into(),
         "go".into(),
+        "h".into(),
+        "hpp".into(),
         "java".into(),
         "js".into(),
         "jsx".into(),
@@ -1982,5 +2283,281 @@ mod tests {
             sanitized.starts_with("[invalid url:"),
             "invalid url should include reason"
         );
+    }
+
+    #[test]
+    fn legacy_u8_toggle_maps_to_rerank_strategy() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1,
+            "vectorDb": {
+                "experimentalU8Search": true
+            }
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+
+        assert_eq!(config.vector_db.search_strategy, None);
+        assert_eq!(
+            config.vector_db.effective_search_strategy(),
+            VectorSearchStrategy::U8ThenF32Rerank
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_strategy_takes_precedence_over_legacy_u8_toggle() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1,
+            "vectorDb": {
+                "experimentalU8Search": true,
+                "searchStrategy": "f32-hnsw"
+            }
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+
+        assert_eq!(
+            config.vector_db.search_strategy,
+            Some(VectorSearchStrategy::F32Hnsw)
+        );
+        assert_eq!(
+            config.vector_db.effective_search_strategy(),
+            VectorSearchStrategy::F32Hnsw
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vector_kernel_defaults_to_hnsw_rs() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+        assert_eq!(
+            config.vector_db.effective_vector_kernel(),
+            VectorKernelKind::HnswRs
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_vector_kernel_is_honored() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1,
+            "vectorDb": {
+                "vectorKernel": "dfrr"
+            }
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+        assert_eq!(config.vector_db.vector_kernel, Some(VectorKernelKind::Dfrr));
+        assert_eq!(
+            config.vector_db.effective_vector_kernel(),
+            VectorKernelKind::Dfrr
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn force_reindex_on_kernel_change_defaults_to_false() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+        assert!(!config.vector_db.force_reindex_on_kernel_change);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_force_reindex_on_kernel_change_is_honored() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1,
+            "vectorDb": {
+                "forceReindexOnKernelChange": true
+            }
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+        assert!(config.vector_db.force_reindex_on_kernel_change);
+        Ok(())
+    }
+
+    #[test]
+    fn dfrr_search_config_defaults_when_absent() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1,
+            "vectorDb": {
+                "vectorKernel": "dfrr"
+            }
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+        assert!(config.vector_db.dfrr_search.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn dfrr_search_config_serde_round_trip() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1,
+            "vectorDb": {
+                "vectorKernel": "dfrr",
+                "dfrrSearch": {
+                    "efSearch": 96,
+                    "pivotCount": 8,
+                    "baseLevelPivotMultiplier": 3,
+                    "bucketCount": 12,
+                    "pullSize": 8,
+                    "splitThreshold": 48,
+                    "adaptiveBucketWidths": false,
+                    "refineAfterFirstPull": false,
+                    "maxIterations": 512,
+                    "enableExhaustionGuard": false,
+                    "clusterCount": 5,
+                    "queryStrategy": "nearest-centroid-multi-probe",
+                    "queryProbeCount": 7,
+                    "queryMinClusterSize": 21,
+                    "bq1Threshold": 0.30
+                }
+            }
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+        let dfrr = config
+            .vector_db
+            .dfrr_search
+            .ok_or_else(|| std::io::Error::other("expected dfrrSearch to be present"))?;
+        assert_eq!(dfrr.ef_search, 96);
+        assert_eq!(dfrr.pivot_count, 8);
+        assert_eq!(dfrr.base_level_pivot_multiplier, 3);
+        assert_eq!(dfrr.bucket_count, 12);
+        assert_eq!(dfrr.pull_size, 8);
+        assert_eq!(dfrr.split_threshold, 48);
+        assert!(!dfrr.adaptive_bucket_widths);
+        assert!(!dfrr.refine_after_first_pull);
+        assert_eq!(dfrr.max_iterations, 512);
+        assert!(!dfrr.enable_exhaustion_guard);
+        assert_eq!(dfrr.cluster_count, 5);
+        assert_eq!(
+            dfrr.query_strategy,
+            DfrrQueryStrategy::NearestCentroidMultiProbe
+        );
+        assert_eq!(dfrr.query_probe_count, 7);
+        assert_eq!(dfrr.query_min_cluster_size, 21);
+        assert_eq!(dfrr.bq1_threshold, Some(DfrrBq1Threshold::new(0.30)));
+
+        // Round-trip: serialize back and verify
+        let serialized = serde_json::to_value(&config.vector_db)?;
+        let dfrr_block = serialized
+            .get("dfrrSearch")
+            .ok_or_else(|| std::io::Error::other("dfrrSearch missing in serialized output"))?;
+        assert_eq!(dfrr_block["efSearch"], 96);
+        assert_eq!(dfrr_block["pivotCount"], 8);
+        assert_eq!(dfrr_block["baseLevelPivotMultiplier"], 3);
+        assert_eq!(dfrr_block["bucketCount"], 12);
+        assert_eq!(dfrr_block["pullSize"], 8);
+        assert_eq!(dfrr_block["splitThreshold"], 48);
+        assert_eq!(dfrr_block["adaptiveBucketWidths"], false);
+        assert_eq!(dfrr_block["refineAfterFirstPull"], false);
+        assert_eq!(dfrr_block["maxIterations"], 512);
+        assert_eq!(dfrr_block["enableExhaustionGuard"], false);
+        assert_eq!(dfrr_block["clusterCount"], 5);
+        assert_eq!(
+            dfrr_block["queryStrategy"],
+            serde_json::Value::String("nearest-centroid-multi-probe".to_string())
+        );
+        assert_eq!(dfrr_block["queryProbeCount"], 7);
+        assert_eq!(dfrr_block["queryMinClusterSize"], 21);
+        let bq1_threshold = dfrr_block
+            .get("bq1Threshold")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| std::io::Error::other("bq1Threshold missing or not numeric"))?;
+        assert!((bq1_threshold - 0.30).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn dfrr_search_config_partial_fields_use_defaults() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1,
+            "vectorDb": {
+                "dfrrSearch": {
+                    "efSearch": 128,
+                    "queryStrategy": "nearest-centroid-multi-probe"
+                }
+            }
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+        let dfrr = config
+            .vector_db
+            .dfrr_search
+            .ok_or_else(|| std::io::Error::other("expected dfrrSearch to be present"))?;
+        assert_eq!(dfrr.ef_search, 128);
+        // Other fields should use defaults
+        assert_eq!(dfrr.pivot_count, 4);
+        assert_eq!(dfrr.base_level_pivot_multiplier, 2);
+        assert_eq!(dfrr.bucket_count, 8);
+        assert_eq!(dfrr.pull_size, 4);
+        assert_eq!(dfrr.split_threshold, 64);
+        assert!(dfrr.adaptive_bucket_widths);
+        assert!(dfrr.refine_after_first_pull);
+        assert_eq!(dfrr.max_iterations, 256);
+        assert!(dfrr.enable_exhaustion_guard);
+        assert_eq!(dfrr.cluster_count, 8);
+        assert_eq!(
+            dfrr.query_strategy,
+            DfrrQueryStrategy::NearestCentroidMultiProbe
+        );
+        assert_eq!(dfrr.query_probe_count, 3);
+        assert_eq!(dfrr.query_min_cluster_size, 64);
+        assert_eq!(dfrr.bq1_threshold, None);
+        Ok(())
+    }
+
+    #[test]
+    fn dfrr_search_config_with_kernel_selection() -> Result<(), Box<dyn Error>> {
+        // Full config combining kernel selection + search tuning (like --overrides-json)
+        let payload = serde_json::json!({
+            "version": 1,
+            "vectorDb": {
+                "vectorKernel": "dfrr",
+                "dfrrSearch": {
+                    "efSearch": 64,
+                    "pivotCount": 8,
+                    "baseLevelPivotMultiplier": 5,
+                    "bucketCount": 10,
+                    "pullSize": 4,
+                    "splitThreshold": 32,
+                    "maxIterations": 256,
+                    "clusterCount": 12,
+                    "queryStrategy": "static",
+                    "queryProbeCount": 2,
+                    "queryMinClusterSize": 5
+                }
+            }
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+        let dfrr = config
+            .vector_db
+            .dfrr_search
+            .ok_or_else(|| std::io::Error::other("expected dfrrSearch to be present"))?;
+        assert_eq!(dfrr.ef_search, 64);
+        assert_eq!(dfrr.pivot_count, 8);
+        assert_eq!(dfrr.base_level_pivot_multiplier, 5);
+        assert_eq!(dfrr.bucket_count, 10);
+        assert_eq!(dfrr.split_threshold, 32);
+        assert_eq!(dfrr.cluster_count, 12);
+        assert_eq!(dfrr.query_strategy, DfrrQueryStrategy::Static);
+        assert_eq!(dfrr.query_probe_count, 2);
+        assert_eq!(dfrr.query_min_cluster_size, 5);
+        assert_eq!(dfrr.bq1_threshold, None);
+        assert_eq!(
+            config.vector_db.effective_vector_kernel(),
+            VectorKernelKind::Dfrr
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dfrr_search_config_not_serialized_when_none() -> Result<(), Box<dyn Error>> {
+        let config = VectorDbConfig::default();
+        let serialized = serde_json::to_value(&config)?;
+        // dfrrSearch should be absent (skip_serializing_if = "Option::is_none")
+        assert!(serialized.get("dfrrSearch").is_none());
+        Ok(())
     }
 }

@@ -26,13 +26,19 @@ pub use semantic_code_shared::shared_crate_version;
 // DOMAIN MODULES
 // =============================================================================
 
-pub mod chunk;
-pub mod metadata;
-pub mod primitives;
-pub mod search;
-pub mod spans;
-pub mod states;
+mod calibration;
+mod chunk;
+mod metadata;
+mod primitives;
+mod search;
+mod search_stats;
+mod spans;
+mod states;
 
+pub use calibration::{
+    CalibrationParamError, CalibrationParams, CalibrationPrecision, CalibrationQueryCount,
+    CalibrationState, CalibrationTopK, EmaState, TargetRecall,
+};
 pub use chunk::{Chunk, ChunkError, MAX_CHUNK_CHARS};
 pub use metadata::{ChunkMetadata, DocumentMetadata, MetadataError, VectorDocumentMetadata};
 pub use primitives::{
@@ -43,6 +49,7 @@ pub use primitives::{
 pub use search::{
     SearchFilter, SearchOptions, SearchQuery, SearchResult, SearchResultKey, compare_search_results,
 };
+pub use search_stats::SearchStats;
 pub use spans::{Language, LineSpan};
 pub use states::{IndexStatus, IndexingState, ProgressEvent};
 

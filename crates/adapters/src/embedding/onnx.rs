@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
 use tokenizers::utils::padding::{PaddingDirection, PaddingParams, PaddingStrategy};
 use tokenizers::utils::truncation::{TruncationDirection, TruncationParams, TruncationStrategy};
+use tracing::Instrument;
 
 const DEFAULT_TEST_TEXT: &str = "dimension probe";
 const DEFAULT_MODEL_FILE: &str = "model.onnx";
@@ -408,26 +409,35 @@ impl EmbeddingPort for OnnxEmbedding {
     ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<EmbeddingVector>>> {
         let ctx = ctx.clone();
         let texts = request.texts;
+        let batch_size = texts.len();
         let tokenizer = Arc::clone(&self.tokenizer);
         let inputs = self.inputs.clone();
         let output_name = self.output_name.clone();
         let session_pool = Arc::clone(&self.session_pool);
         let dimension_override = self.dimension_override.or(self.model_dimension);
+        let span = tracing::info_span!(
+            "adapter.embedding.onnx.embed_batch",
+            provider = "onnx",
+            batch_size
+        );
 
-        Box::pin(async move {
-            ctx.ensure_not_cancelled("onnx_embedding.embed_batch")?;
-            Self::run_blocking(&ctx, "onnx_embedding.embed_batch", move || {
-                Self::embed_many_sync(
-                    &tokenizer,
-                    &inputs,
-                    output_name.as_ref(),
-                    &session_pool,
-                    &texts,
-                    dimension_override,
-                )
-            })
-            .await
-        })
+        Box::pin(
+            async move {
+                ctx.ensure_not_cancelled("onnx_embedding.embed_batch")?;
+                Self::run_blocking(&ctx, "onnx_embedding.embed_batch", move || {
+                    Self::embed_many_sync(
+                        &tokenizer,
+                        &inputs,
+                        output_name.as_ref(),
+                        &session_pool,
+                        &texts,
+                        dimension_override,
+                    )
+                })
+                .await
+            }
+            .instrument(span),
+        )
     }
 }
 
@@ -848,7 +858,7 @@ fn resolve_inputs(inputs: &[ort::value::Outlet]) -> Result<ModelInputs> {
 }
 
 fn map_pooled_embeddings(
-    shape: &ort::tensor::Shape,
+    shape: &[i64],
     data: &[f32],
     batch_size: usize,
     expected_dimension: Option<u32>,
@@ -898,7 +908,7 @@ fn map_pooled_embeddings(
 }
 
 fn map_sequence_embeddings(
-    shape: &ort::tensor::Shape,
+    shape: &[i64],
     data: &[f32],
     batch_size: usize,
     sequence_length: usize,

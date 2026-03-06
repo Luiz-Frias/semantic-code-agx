@@ -74,9 +74,23 @@ fn matches_segments(path: &[&str], pattern: &[&str]) -> bool {
         return false;
     }
     for window in path.windows(pattern.len()) {
-        if window == pattern {
+        let all_match = pattern
+            .iter()
+            .zip(window.iter())
+            .all(|(pattern, path_segment)| matches_path_segment(pattern, path_segment));
+        if all_match {
             return true;
         }
+    }
+    false
+}
+
+fn matches_path_segment(pattern: &str, segment: &str) -> bool {
+    if pattern == segment {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        return segment.ends_with(&format!(".{suffix}"));
     }
     false
 }
@@ -139,6 +153,42 @@ mod tests {
             relative_path: "node_modules/pkg/index.js".into(),
         };
         assert_eq!(matcher.is_ignored(&input_a), matcher.is_ignored(&input_b));
+    }
+
+    #[test]
+    fn ignores_wildcard_extension_patterns() {
+        let matcher = IgnoreMatcher::new();
+        let input = IgnoreMatchInput {
+            ignore_patterns: vec!["*.json".into(), "*.ipynb".into()],
+            relative_path: "docs/report.ipynb".into(),
+        };
+        assert!(matcher.is_ignored(&input));
+    }
+
+    #[test]
+    fn dotted_patterns_match_exact_segment_only() {
+        let matcher = IgnoreMatcher::new();
+        let exact_match = IgnoreMatchInput {
+            ignore_patterns: vec![".env".into()],
+            relative_path: "config/.env".into(),
+        };
+        assert!(matcher.is_ignored(&exact_match));
+
+        let suffix_only_match = IgnoreMatchInput {
+            ignore_patterns: vec![".env".into()],
+            relative_path: "config/production.env".into(),
+        };
+        assert!(!matcher.is_ignored(&suffix_only_match));
+    }
+
+    #[test]
+    fn dotted_pattern_does_not_match_suffixes() {
+        let matcher = IgnoreMatcher::new();
+        let input = IgnoreMatchInput {
+            ignore_patterns: vec![".env".into()],
+            relative_path: "config/production.env".into(),
+        };
+        assert!(!matcher.is_ignored(&input));
     }
 
     #[test]

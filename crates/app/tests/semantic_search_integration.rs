@@ -80,11 +80,13 @@ async fn search_fixture_repo_with_in_memory_adapters() -> Result<()> {
         query: "needle".into(),
         top_k: Some(5),
         threshold: Some(0.0),
+        query_vector: None,
     };
 
     let results = semantic_search(&ctx, &deps, input).await?;
     assert!(
         results
+            .results
             .iter()
             .any(|result| result.key.relative_path.as_ref() == relative_path),
         "expected results to include fixture path"

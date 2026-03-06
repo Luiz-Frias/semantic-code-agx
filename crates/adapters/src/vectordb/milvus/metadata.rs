@@ -5,7 +5,7 @@ use semantic_code_shared::{ErrorCode, ErrorEnvelope, Result};
 use serde_json::Value;
 
 /// Serializes vector document metadata into a JSON string for storage.
-pub fn serialize_metadata(metadata: &VectorDocumentMetadata) -> Result<String> {
+pub(super) fn serialize_metadata(metadata: &VectorDocumentMetadata) -> Result<String> {
     serde_json::to_string(metadata).map_err(|error| {
         ErrorEnvelope::unexpected(
             ErrorCode::new("vector", "metadata_serialize_failed"),
@@ -16,7 +16,7 @@ pub fn serialize_metadata(metadata: &VectorDocumentMetadata) -> Result<String> {
 }
 
 /// Parses a JSON metadata payload from Milvus into a typed metadata object.
-pub fn parse_metadata(raw: Option<&str>) -> Option<VectorDocumentMetadata> {
+pub(super) fn parse_metadata(raw: Option<&str>) -> Option<VectorDocumentMetadata> {
     let raw = raw?.trim();
     if raw.is_empty() {
         return None;
@@ -26,7 +26,7 @@ pub fn parse_metadata(raw: Option<&str>) -> Option<VectorDocumentMetadata> {
 }
 
 /// Builds metadata from Milvus row fields and optional metadata JSON.
-pub fn metadata_from_fields(
+pub(super) fn metadata_from_fields(
     relative_path: &str,
     start_line: i64,
     end_line: i64,

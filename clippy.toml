@@ -1,7 +1,7 @@
 # =============================================================================
 # CLIPPY CONFIGURATION
 # =============================================================================
-# Lint configuration for the semantic-code-agx workspace.
+# Lint configuration for the semantic-code-agents-rs workspace.
 # Run: cargo clippy --workspace --all-targets -- -D warnings
 # =============================================================================
 
@@ -14,7 +14,7 @@ cognitive-complexity-threshold = 25
 too-many-lines-threshold = 100
 
 # Maximum number of arguments a function can have
-too-many-arguments-threshold = 7
+too-many-arguments-threshold = 10
 
 # Struct fields threshold for "large" types
 # Affects clippy::large_types_passed_by_value
@@ -58,7 +58,7 @@ doc-valid-idents = [
 ]
 
 # MSRV for lint suggestions
-msrv = "1.95.0"
+msrv = "1.96.0"
 
 # =============================================================================
 # NOTES ON LINT LEVELS

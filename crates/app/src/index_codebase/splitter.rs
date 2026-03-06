@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub struct SplitStatsGuard {
+struct SplitStatsGuard {
     stats: Arc<IndexStageStatsCollector>,
     started: Instant,
     files: u64,
@@ -18,7 +18,7 @@ pub struct SplitStatsGuard {
 }
 
 impl SplitStatsGuard {
-    pub(crate) fn new(stats: Arc<IndexStageStatsCollector>) -> Self {
+    pub(super) fn new(stats: Arc<IndexStageStatsCollector>) -> Self {
         Self {
             stats,
             started: Instant::now(),
@@ -39,7 +39,7 @@ impl Drop for SplitStatsGuard {
     }
 }
 
-pub struct SpawnFileTaskContext {
+struct SpawnFileTaskContext {
     request_ctx: RequestContext,
     deps: super::types::IndexCodebaseDeps,
     codebase_root: std::path::PathBuf,
@@ -50,7 +50,7 @@ pub struct SpawnFileTaskContext {
 }
 
 impl SpawnFileTaskContext {
-    pub(crate) fn new(task_ctx: &FileTaskContext<'_>, relative_path: Box<str>) -> Result<Self> {
+    pub(super) fn new(task_ctx: &FileTaskContext<'_>, relative_path: Box<str>) -> Result<Self> {
         let safe_file = task_ctx
             .deps
             .path_policy
@@ -66,7 +66,7 @@ impl SpawnFileTaskContext {
         })
     }
 
-    pub(crate) async fn run(self) -> Result<FileResult> {
+    pub(super) async fn run(self) -> Result<FileResult> {
         let Self {
             request_ctx,
             deps,
@@ -116,7 +116,7 @@ impl SpawnFileTaskContext {
     }
 }
 
-pub fn submit_file_task<'a>(
+pub(super) fn submit_file_task<'a>(
     task_ctx: &FileTaskContext<'a>,
     inflight: &mut HashMap<usize, super::types::BoxFuture<'a, Result<FileResult>>>,
     file_index: usize,

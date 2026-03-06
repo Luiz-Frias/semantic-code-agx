@@ -4,7 +4,7 @@ use semantic_code_domain::CollectionName;
 use semantic_code_ports::{
     BoxFuture, HybridSearchBatchRequest, HybridSearchData, HybridSearchRequest, HybridSearchResult,
     VectorDbPort, VectorDbProviderInfo, VectorDocumentForInsert, VectorSearchRequest,
-    VectorSearchResult,
+    VectorSearchResponse,
 };
 use semantic_code_shared::{ErrorCode, ErrorEnvelope, RequestContext, Result};
 use serde_json::Value;
@@ -177,11 +177,19 @@ where
         self.inner.insert_hybrid(ctx, collection_name, documents)
     }
 
+    fn flush(
+        &self,
+        ctx: &RequestContext,
+        collection_name: CollectionName,
+    ) -> BoxFuture<'_, Result<()>> {
+        self.inner.flush(ctx, collection_name)
+    }
+
     fn search(
         &self,
         ctx: &RequestContext,
         request: VectorSearchRequest,
-    ) -> BoxFuture<'_, Result<Vec<VectorSearchResult>>> {
+    ) -> BoxFuture<'_, Result<VectorSearchResponse>> {
         let expected = match Self::expected_dimension() {
             Ok(value) => value,
             Err(error) => return Box::pin(async move { Err(error) }),
@@ -226,5 +234,165 @@ where
     ) -> BoxFuture<'_, Result<Vec<BTreeMap<Box<str>, Value>>>> {
         self.inner
             .query(ctx, collection_name, filter, output_fields, limit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use semantic_code_domain::{CollectionName, VectorDbProviderId};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Clone)]
+    struct FlushSpyVectorDb {
+        provider: VectorDbProviderInfo,
+        flush_calls: Arc<AtomicUsize>,
+    }
+
+    impl FlushSpyVectorDb {
+        fn new() -> Result<Self> {
+            Ok(Self {
+                provider: VectorDbProviderInfo {
+                    id: VectorDbProviderId::parse("flush_spy").map_err(ErrorEnvelope::from)?,
+                    name: "flush-spy".into(),
+                },
+                flush_calls: Arc::new(AtomicUsize::new(0)),
+            })
+        }
+    }
+
+    impl VectorDbPort for FlushSpyVectorDb {
+        fn provider(&self) -> &VectorDbProviderInfo {
+            &self.provider
+        }
+
+        fn create_collection(
+            &self,
+            _ctx: &RequestContext,
+            _collection_name: CollectionName,
+            _dimension: u32,
+            _description: Option<Box<str>>,
+        ) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn create_hybrid_collection(
+            &self,
+            _ctx: &RequestContext,
+            _collection_name: CollectionName,
+            _dimension: u32,
+            _description: Option<Box<str>>,
+        ) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn drop_collection(
+            &self,
+            _ctx: &RequestContext,
+            _collection_name: CollectionName,
+        ) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn has_collection(
+            &self,
+            _ctx: &RequestContext,
+            _collection_name: CollectionName,
+        ) -> BoxFuture<'_, Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn list_collections(
+            &self,
+            _ctx: &RequestContext,
+        ) -> BoxFuture<'_, Result<Vec<CollectionName>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn insert(
+            &self,
+            _ctx: &RequestContext,
+            _collection_name: CollectionName,
+            _documents: Vec<VectorDocumentForInsert>,
+        ) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn insert_hybrid(
+            &self,
+            _ctx: &RequestContext,
+            _collection_name: CollectionName,
+            _documents: Vec<VectorDocumentForInsert>,
+        ) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn flush(
+            &self,
+            _ctx: &RequestContext,
+            _collection_name: CollectionName,
+        ) -> BoxFuture<'_, Result<()>> {
+            let flush_calls = Arc::clone(&self.flush_calls);
+            Box::pin(async move {
+                flush_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+        }
+
+        fn search(
+            &self,
+            _ctx: &RequestContext,
+            _request: VectorSearchRequest,
+        ) -> BoxFuture<'_, Result<VectorSearchResponse>> {
+            Box::pin(async {
+                Ok(VectorSearchResponse {
+                    results: Vec::new(),
+                    stats: None,
+                })
+            })
+        }
+
+        fn hybrid_search(
+            &self,
+            _ctx: &RequestContext,
+            _request: HybridSearchBatchRequest,
+        ) -> BoxFuture<'_, Result<Vec<HybridSearchResult>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn delete(
+            &self,
+            _ctx: &RequestContext,
+            _collection_name: CollectionName,
+            _ids: Vec<Box<str>>,
+        ) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn query(
+            &self,
+            _ctx: &RequestContext,
+            _collection_name: CollectionName,
+            _filter: Box<str>,
+            _output_fields: Vec<Box<str>>,
+            _limit: Option<u32>,
+        ) -> BoxFuture<'_, Result<Vec<BTreeMap<Box<str>, Value>>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_dimension_wrapper_forwards_flush() -> Result<()> {
+        let inner = FlushSpyVectorDb::new()?;
+        let flush_calls = Arc::clone(&inner.flush_calls);
+        let wrapper = FixedDimensionVectorDb::<FlushSpyVectorDb, 384>::new(inner);
+        let ctx = RequestContext::new_request();
+        let collection = CollectionName::parse("flush_forwarding").map_err(ErrorEnvelope::from)?;
+
+        wrapper.flush(&ctx, collection).await?;
+
+        assert_eq!(flush_calls.load(Ordering::Relaxed), 1);
+        Ok(())
     }
 }

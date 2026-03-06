@@ -1,5 +1,5 @@
 # =============================================================================
-# GITIGNORE - semantic-code-agx
+# GITIGNORE - semantic-code-agents-rs
 # =============================================================================
 # Comprehensive ignore rules for Rust CLI project with hexagonal architecture.
 # Organized by category for maintainability.
@@ -10,6 +10,7 @@
 # =============================================================================
 # Compilation artifacts
 /target/
+target
 **/target/
 debug/
 /release/
@@ -28,6 +29,10 @@ perf.data.old
 flamegraph.svg
 *.profraw
 *.profdata
+
+# PGO profiling directories
+target/pgo-profiles/
+tmp/pgo-corpus/
 
 # Code coverage
 *.gcda
@@ -106,6 +111,13 @@ yarn-debug.log*
 yarn-error.log*
 .npm/
 .yarn/
+
+# =============================================================================
+# LOCAL TOOL & MCP CONFIGURATION
+# =============================================================================
+# .mcp.json contains machine-specific absolute paths (e.g. mise tool installs).
+# Each developer creates their own from .mcp.json.example.
+.mcp.json
 
 # =============================================================================
 # ENVIRONMENT & SECRETS
@@ -201,10 +213,15 @@ $RECYCLE.BIN/
 references/
 
 # Docker volumes (local development data)
+volumes
 volumes/
+volumes.*/
 
 # Local vector index data (.context/ is the project-local index)
 .context/
+
+# Codex transient sub-agent worktrees
+.claude/worktrees/
 
 # CI monitoring state (cached between runs)
 .ci-monitor-state/
@@ -216,6 +233,11 @@ logs/
 # Benchmarks output
 .benchmarks/
 criterion/
+
+# Benchmark data — raw JSONs tracked by DVC, derived outputs gitignored
+benchmarks/data/scaling/*.tsv
+benchmarks/data/scaling/*.md
+benchmarks/data/scaling/charts/
 
 # Test artifacts
 .tmp/

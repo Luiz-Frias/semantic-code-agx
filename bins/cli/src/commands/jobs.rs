@@ -2,6 +2,7 @@
 
 use crate::error::{CliError, ExitCode};
 use crate::format::OutputMode;
+use crate::vector_kernel::VectorKernelMetadata;
 use crate::{CliOutput, format_error_output, infra_exit_code};
 use semantic_code_facade::{JobResult, JobStatus, cancel_job, read_job_status, run_job};
 use std::fmt::Write as _;
@@ -15,7 +16,7 @@ pub fn run_jobs_status(
     job_id: &str,
 ) -> Result<CliOutput, CliError> {
     match read_job_status(codebase_root, job_id) {
-        Ok(status) => format_job_status(mode, &status),
+        Ok(status) => format_job_status(mode, &status, None),
         Err(error) => Ok(format_error_output(mode, &error, infra_exit_code(&error))),
     }
 }
@@ -27,7 +28,7 @@ pub fn run_jobs_cancel(
     job_id: &str,
 ) -> Result<CliOutput, CliError> {
     match cancel_job(codebase_root, job_id) {
-        Ok(status) => format_job_status(mode, &status),
+        Ok(status) => format_job_status(mode, &status, None),
         Err(error) => Ok(format_error_output(mode, &error, infra_exit_code(&error))),
     }
 }
@@ -39,7 +40,7 @@ pub fn run_jobs_run(
     job_id: &str,
 ) -> Result<CliOutput, CliError> {
     match run_job(codebase_root, job_id) {
-        Ok(status) => format_job_status(mode, &status),
+        Ok(status) => format_job_status(mode, &status, None),
         Err(error) => Ok(format_error_output(mode, &error, infra_exit_code(&error))),
     }
 }
@@ -62,26 +63,40 @@ pub fn spawn_job_runner(job_id: &str, codebase_root: &Path) -> Result<(), CliErr
     Ok(())
 }
 
-pub fn format_job_status(mode: OutputMode, status: &JobStatus) -> Result<CliOutput, CliError> {
+pub fn format_job_status(
+    mode: OutputMode,
+    status: &JobStatus,
+    vector_kernel: Option<VectorKernelMetadata>,
+) -> Result<CliOutput, CliError> {
     let stdout = if mode.is_ndjson() {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "type": "job_status",
             "status": "ok",
             "job": status,
         });
+        if let Some(kernel) = vector_kernel
+            && let Some(map) = payload.as_object_mut()
+        {
+            map.insert("vectorKernel".to_owned(), kernel.as_json());
+        }
         let mut out = serde_json::to_string(&payload)?;
         out.push('\n');
         out
     } else if mode.is_json() {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "status": "ok",
             "job": status,
         });
+        if let Some(kernel) = vector_kernel
+            && let Some(map) = payload.as_object_mut()
+        {
+            map.insert("vectorKernel".to_owned(), kernel.as_json());
+        }
         let mut out = serde_json::to_string_pretty(&payload)?;
         out.push('\n');
         out
     } else {
-        format_job_text(status)
+        format_job_text(status, vector_kernel)
     };
 
     Ok(CliOutput {
@@ -91,7 +106,7 @@ pub fn format_job_status(mode: OutputMode, status: &JobStatus) -> Result<CliOutp
     })
 }
 
-fn format_job_text(status: &JobStatus) -> String {
+fn format_job_text(status: &JobStatus, vector_kernel: Option<VectorKernelMetadata>) -> String {
     let mut out = String::new();
     out.push_str("status: ok\n");
     out.push_str("jobId: ");
@@ -184,6 +199,11 @@ fn format_job_text(status: &JobStatus) -> String {
     if let Some(error) = status.error.as_ref() {
         out.push_str("error: ");
         out.push_str(error.message.as_ref());
+        out.push('\n');
+    }
+    if let Some(kernel) = vector_kernel {
+        out.push_str("vectorKernel: ");
+        out.push_str(kernel.effective_label());
         out.push('\n');
     }
     out

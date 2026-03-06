@@ -11,7 +11,7 @@ use semantic_code_ports::{
     HybridSearchData, HybridSearchResult, LogEvent, LogFields, LogLevel, LoggerPort,
     RerankStrategy, RerankStrategyKind, TelemetryPort, TelemetryTags, TelemetryTimer, VectorDbPort,
     VectorDbProviderInfo, VectorDocument, VectorDocumentForInsert, VectorSearchOptions,
-    VectorSearchRequest, VectorSearchResult,
+    VectorSearchRequest, VectorSearchResponse, VectorSearchResult,
 };
 use semantic_code_shared::{ErrorCode, ErrorEnvelope, RequestContext, Result};
 use serde_json::Value;
@@ -426,7 +426,7 @@ impl VectorDbPort for InMemoryVectorDb {
         &self,
         ctx: &RequestContext,
         request: VectorSearchRequest,
-    ) -> BoxFuture<'_, Result<Vec<VectorSearchResult>>> {
+    ) -> BoxFuture<'_, Result<VectorSearchResponse>> {
         let ctx = ctx.clone();
         let VectorSearchRequest {
             collection_name,
@@ -476,7 +476,10 @@ impl VectorDbPort for InMemoryVectorDb {
             });
             scored.truncate(top_k);
 
-            Ok(scored)
+            Ok(VectorSearchResponse {
+                results: scored,
+                stats: None,
+            })
         })
     }
 
@@ -526,7 +529,7 @@ impl VectorDbPort for InMemoryVectorDb {
                     )
                     .await?;
 
-                for result in results {
+                for result in results.results {
                     let id = result.document.id.clone();
                     let entry = merged.entry(id).or_insert(HybridSearchResult {
                         document: result.document,
@@ -672,7 +675,7 @@ impl<const D: usize> VectorDbPort for InMemoryVectorDbFixed<D> {
         &self,
         ctx: &RequestContext,
         request: VectorSearchRequest,
-    ) -> BoxFuture<'_, Result<Vec<VectorSearchResult>>> {
+    ) -> BoxFuture<'_, Result<VectorSearchResponse>> {
         self.inner.search(ctx, request)
     }
 
@@ -837,8 +840,8 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].document.id.as_ref(), "doc_a");
+        assert_eq!(results.results.len(), 2);
+        assert_eq!(results.results[0].document.id.as_ref(), "doc_a");
         Ok(())
     }
 

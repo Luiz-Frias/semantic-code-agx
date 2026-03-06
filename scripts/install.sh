@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="Luiz-Frias/semantic-code-agx"
+REPO="Luiz-Frias/semantic-code-agents-rs"
 BIN_PRIMARY="sca"
 BIN_ALIAS="semantic-code"
 

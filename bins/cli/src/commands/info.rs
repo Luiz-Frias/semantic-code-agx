@@ -3,8 +3,7 @@
 use crate::CliOutput;
 use crate::error::{CliError, ExitCode};
 use crate::format::OutputMode;
-use semantic_code_core::{BuildInfo, build_info};
-use semantic_code_facade::facade_crate_version;
+use semantic_code_facade::{BuildInfo, build_info, facade_crate_version};
 
 /// Run the info command.
 pub fn run_info(mode: OutputMode) -> Result<CliOutput, CliError> {

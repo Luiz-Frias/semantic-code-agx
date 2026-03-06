@@ -4,44 +4,36 @@
 //! This crate depends on `domain` and `shared` only.
 
 /// Environment variable parsing and merging.
-pub mod env;
+mod env;
 /// Config loading helpers (env + file + overrides).
-pub mod load;
+mod load;
 /// Request DTOs and validation.
-pub mod requests;
-/// JSON Schema exports for request DTOs.
-pub mod requests_schema;
+mod requests;
+/// Runtime env projection used by infra/facade composition.
+mod runtime;
 /// Configuration schema types and helpers.
-pub mod schema;
+mod schema;
 /// Storage and persistence configuration.
-pub mod storage;
+mod storage;
 
 pub use schema::{
-    BackendConfig, CURRENT_CONFIG_VERSION, ConfigLimits, ConfigSchemaError,
-    EmbeddingCacheDiskProvider, EmbeddingConfig, EmbeddingJobsConfig, EmbeddingRoutingConfig,
-    EmbeddingRoutingMode, EmbeddingSplitConfig, OnnxEmbeddingConfig, ValidatedBackendConfig,
-    VectorDbIndexConfig, VectorDbIndexSpec, parse_backend_config_json, parse_backend_config_toml,
+    BackendConfig, ConfigSchemaError, DfrrBq1Threshold, DfrrQueryStrategy, DfrrSearchConfig,
+    EmbeddingCacheDiskProvider, EmbeddingConfig, EmbeddingRoutingMode, HnswSearchConfig,
+    ValidatedBackendConfig, VectorKernelKind, VectorSearchStrategy,
 };
 
-pub use env::{BackendEnv, EnvParseError, apply_env_overrides};
 pub use load::{
     load_backend_config_from_path, load_backend_config_from_sources, load_backend_config_std_env,
     to_pretty_json, to_pretty_toml,
 };
 pub use requests::{
-    ClearIndexRequest, ClearIndexRequestDto, IndexRequest, IndexRequestDto, ReindexByChangeRequest,
-    ReindexByChangeRequestDto, RequestValidationError, SearchRequest, SearchRequestDto,
+    ClearIndexRequestDto, IndexRequestDto, ReindexByChangeRequestDto, SearchRequestDto,
     ValidatedClearIndexRequest, ValidatedIndexRequest, ValidatedReindexByChangeRequest,
-    ValidatedSearchRequest, parse_clear_index_request_json, parse_index_request_json,
-    parse_reindex_by_change_request_json, parse_search_request_json, validate_clear_index_request,
-    validate_filter_expr_allowlist, validate_index_request, validate_reindex_by_change_request,
-    validate_search_request,
+    ValidatedSearchRequest, validate_clear_index_request, validate_index_request,
+    validate_reindex_by_change_request, validate_search_request,
 };
-pub use requests_schema::{
-    clear_index_request_schema, index_request_schema, reindex_by_change_request_schema,
-    search_request_schema,
-};
-pub use storage::SnapshotStorageMode;
+pub use runtime::{RuntimeEnv, load_runtime_env_from_map, load_runtime_env_std_env};
+pub use storage::{SnapshotStorageMode, VectorSnapshotFormat};
 
 /// Returns the config crate version.
 #[must_use]

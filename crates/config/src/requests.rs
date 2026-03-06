@@ -12,7 +12,6 @@
 use schemars::JsonSchema;
 use semantic_code_domain::CollectionName;
 use semantic_code_shared::{ErrorCode, ErrorEnvelope, Validate, Validated, ValidationError};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
@@ -378,47 +377,6 @@ pub fn validate_clear_index_request(
     dto.validate().map_err(ErrorEnvelope::from)?;
     let codebase_root = validate_codebase_root(&dto.codebase_root)?;
     Ok(Validated::new(ClearIndexRequest { codebase_root }))
-}
-
-/// Parse and validate an index request from JSON.
-pub fn parse_index_request_json(input: &str) -> Result<ValidatedIndexRequest, ErrorEnvelope> {
-    let dto: IndexRequestDto = parse_request_json("index", input)?;
-    validate_index_request(&dto)
-}
-
-/// Parse and validate a search request from JSON.
-pub fn parse_search_request_json(input: &str) -> Result<ValidatedSearchRequest, ErrorEnvelope> {
-    let dto: SearchRequestDto = parse_request_json("search", input)?;
-    validate_search_request(&dto)
-}
-
-/// Parse and validate a reindex-by-change request from JSON.
-pub fn parse_reindex_by_change_request_json(
-    input: &str,
-) -> Result<ValidatedReindexByChangeRequest, ErrorEnvelope> {
-    let dto: ReindexByChangeRequestDto = parse_request_json("reindexByChange", input)?;
-    validate_reindex_by_change_request(&dto)
-}
-
-/// Parse and validate a clear-index request from JSON.
-pub fn parse_clear_index_request_json(
-    input: &str,
-) -> Result<ValidatedClearIndexRequest, ErrorEnvelope> {
-    let dto: ClearIndexRequestDto = parse_request_json("clearIndex", input)?;
-    validate_clear_index_request(&dto)
-}
-
-fn parse_request_json<T: DeserializeOwned>(
-    kind: &'static str,
-    input: &str,
-) -> Result<T, ErrorEnvelope> {
-    serde_json::from_str(input).map_err(|error| {
-        ErrorEnvelope::expected(
-            ErrorCode::new("config", "invalid_json"),
-            format!("invalid {kind} request JSON: {error}"),
-        )
-        .with_metadata("request_kind", kind)
-    })
 }
 
 fn require_trimmed(field: &'static str, value: &str) -> Result<Box<str>, ErrorEnvelope> {

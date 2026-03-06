@@ -1,4 +1,4 @@
-use semantic_code_ports::embedding::EmbeddingVector;
+use semantic_code_ports::EmbeddingVector;
 use semantic_code_shared::{ErrorCode, ErrorEnvelope, Result};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -107,7 +107,7 @@ impl MemoryCache {
 #[cfg(test)]
 mod tests {
     use super::super::{CacheSource, DiskCacheProvider, EmbeddingCache, EmbeddingCacheConfig};
-    use semantic_code_ports::embedding::EmbeddingVector;
+    use semantic_code_ports::EmbeddingVector;
     use semantic_code_shared::Result;
 
     #[tokio::test]

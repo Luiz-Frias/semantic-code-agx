@@ -1,7 +1,9 @@
 //! Vector DB boundary contract.
 
 use crate::BoxFuture;
-use semantic_code_domain::{CollectionName, VectorDbProviderId, VectorDocumentMetadata};
+use semantic_code_domain::{
+    CollectionName, SearchStats, VectorDbProviderId, VectorDocumentMetadata,
+};
 use semantic_code_shared::{RequestContext, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -72,6 +74,15 @@ pub struct VectorSearchResult {
     pub document: VectorDocument,
     /// Similarity score.
     pub score: f32,
+}
+
+/// Dense vector search response payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorSearchResponse {
+    /// Search results.
+    pub results: Vec<VectorSearchResult>,
+    /// Optional search diagnostics.
+    pub stats: Option<SearchStats>,
 }
 
 /// Hybrid search request payload.
@@ -201,12 +212,23 @@ pub trait VectorDbPort: Send + Sync {
         documents: Vec<VectorDocumentForInsert>,
     ) -> BoxFuture<'_, Result<()>>;
 
+    /// Ensure writes are durably visible for subsequent reads.
+    ///
+    /// Default implementation is a no-op so providers can opt in.
+    fn flush(
+        &self,
+        _ctx: &RequestContext,
+        _collection_name: CollectionName,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Perform a dense vector search.
     fn search(
         &self,
         ctx: &RequestContext,
         request: VectorSearchRequest,
-    ) -> BoxFuture<'_, Result<Vec<VectorSearchResult>>>;
+    ) -> BoxFuture<'_, Result<VectorSearchResponse>>;
 
     /// Perform a hybrid search (dense and/or sparse sub-queries).
     fn hybrid_search(
@@ -234,8 +256,15 @@ pub trait VectorDbPort: Send + Sync {
     ) -> BoxFuture<'_, Result<Vec<VectorDbRow>>>;
 }
 
-/// Lending-style vector DB port using GAT futures.
-pub trait VectorDbPortLend: Send + Sync {
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Internal lending shim over [`VectorDbPort`] using GAT futures.
+///
+/// This trait is intentionally sealed to preserve the blanket-impl bridge
+/// semantics between object-safe ports and lending call sites.
+pub trait VectorDbPortLend: sealed::Sealed + Send + Sync {
     /// Future type returned by this port.
     type Future<'a, T>: Future<Output = Result<T>> + Send + 'a
     where
@@ -296,12 +325,15 @@ pub trait VectorDbPortLend: Send + Sync {
         documents: Vec<VectorDocumentForInsert>,
     ) -> Self::Future<'_, ()>;
 
+    /// Ensure writes are durably visible for subsequent reads.
+    fn flush(&self, ctx: &RequestContext, collection_name: CollectionName) -> Self::Future<'_, ()>;
+
     /// Perform a dense vector search.
     fn search(
         &self,
         ctx: &RequestContext,
         request: VectorSearchRequest,
-    ) -> Self::Future<'_, Vec<VectorSearchResult>>;
+    ) -> Self::Future<'_, VectorSearchResponse>;
 
     /// Perform a hybrid search (dense and/or sparse sub-queries).
     fn hybrid_search(
@@ -328,6 +360,8 @@ pub trait VectorDbPortLend: Send + Sync {
         limit: Option<u32>,
     ) -> Self::Future<'_, Vec<VectorDbRow>>;
 }
+
+impl<T> sealed::Sealed for T where T: VectorDbPort + ?Sized {}
 
 impl<T> VectorDbPortLend for T
 where
@@ -401,11 +435,15 @@ where
         VectorDbPort::insert_hybrid(self, ctx, collection_name, documents)
     }
 
+    fn flush(&self, ctx: &RequestContext, collection_name: CollectionName) -> Self::Future<'_, ()> {
+        VectorDbPort::flush(self, ctx, collection_name)
+    }
+
     fn search(
         &self,
         ctx: &RequestContext,
         request: VectorSearchRequest,
-    ) -> Self::Future<'_, Vec<VectorSearchResult>> {
+    ) -> Self::Future<'_, VectorSearchResponse> {
         VectorDbPort::search(self, ctx, request)
     }
 

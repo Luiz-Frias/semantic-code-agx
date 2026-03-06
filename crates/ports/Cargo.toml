@@ -17,3 +17,4 @@ semantic-code-shared.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+trybuild = "1.0"

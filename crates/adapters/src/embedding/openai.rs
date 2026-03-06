@@ -10,6 +10,7 @@ use semantic_code_ports::{
 use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tracing::Instrument;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL: &str = "text-embedding-3-small";
@@ -241,15 +242,23 @@ impl EmbeddingPort for OpenAiEmbedding {
         let ctx = ctx.clone();
         let texts = request.texts;
         let expected_count = texts.len();
-        Box::pin(async move {
-            self.embed_many(
-                &ctx,
-                OpenAiInput::Many(texts),
-                expected_count,
-                "openai_embedding.embed_batch",
-            )
-            .await
-        })
+        let span = tracing::info_span!(
+            "adapter.embedding.openai.embed_batch",
+            provider = "openai",
+            batch_size = expected_count
+        );
+        Box::pin(
+            async move {
+                self.embed_many(
+                    &ctx,
+                    OpenAiInput::Many(texts),
+                    expected_count,
+                    "openai_embedding.embed_batch",
+                )
+                .await
+            }
+            .instrument(span),
+        )
     }
 }
 

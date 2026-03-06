@@ -11,9 +11,14 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+loom-tests = []
+
 [dependencies]
 serde.workspace = true
 tokio.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+loom = "0.7"

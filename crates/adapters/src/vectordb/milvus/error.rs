@@ -4,7 +4,7 @@ use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Identifies the Milvus transport used for error metadata.
-pub enum MilvusProviderId {
+pub(super) enum MilvusProviderId {
     /// Milvus gRPC client.
     Grpc,
     /// Milvus REST client.
@@ -23,7 +23,7 @@ impl MilvusProviderId {
 
 #[derive(Debug, Clone)]
 /// Context payload attached to Milvus error envelopes.
-pub struct MilvusErrorContext {
+pub(super) struct MilvusErrorContext {
     /// Provider identifier for the failing request.
     pub provider: MilvusProviderId,
     /// Operation label for tracing failures.
@@ -36,7 +36,7 @@ pub struct MilvusErrorContext {
 
 #[cfg(feature = "milvus-grpc")]
 /// Maps a tonic gRPC status into the shared error envelope format.
-pub fn map_grpc_error(status: &tonic::Status, ctx: &MilvusErrorContext) -> ErrorEnvelope {
+pub(super) fn map_grpc_error(status: &tonic::Status, ctx: &MilvusErrorContext) -> ErrorEnvelope {
     let message = status.message().to_string();
     let code = match status.code() {
         tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => vdb_auth_code(),
@@ -64,7 +64,7 @@ pub fn map_grpc_error(status: &tonic::Status, ctx: &MilvusErrorContext) -> Error
 }
 
 /// Maps Milvus REST error payloads and status codes into shared envelopes.
-pub fn map_rest_error(
+pub(super) fn map_rest_error(
     message: impl Into<String>,
     http_status: Option<u16>,
     ctx: &MilvusErrorContext,
@@ -95,7 +95,10 @@ pub fn map_rest_error(
 
 #[cfg(feature = "milvus-rest")]
 /// Maps reqwest transport errors into shared error envelopes.
-pub fn map_rest_transport_error(error: &reqwest::Error, ctx: &MilvusErrorContext) -> ErrorEnvelope {
+pub(super) fn map_rest_transport_error(
+    error: &reqwest::Error,
+    ctx: &MilvusErrorContext,
+) -> ErrorEnvelope {
     if error.is_timeout() {
         return ErrorEnvelope::unexpected(
             vdb_timeout_code(),
@@ -126,7 +129,7 @@ pub fn map_rest_transport_error(error: &reqwest::Error, ctx: &MilvusErrorContext
 
 #[cfg(feature = "milvus-grpc")]
 /// Maps Milvus status error codes into shared error envelopes.
-pub fn map_status_error(
+pub(super) fn map_status_error(
     code: crate::vectordb::milvus::proto::common::ErrorCode,
     reason: &str,
     ctx: &MilvusErrorContext,

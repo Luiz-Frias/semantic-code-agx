@@ -38,6 +38,7 @@ timeoutMs = 60000
 indexTimeoutMs = 3600000
 batchSize = 128
 snapshotStorage = "project"
+snapshotFormat = "v1"
 
 [vectorDb.index.dense]
 indexType = "HNSW"

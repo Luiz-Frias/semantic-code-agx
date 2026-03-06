@@ -18,15 +18,9 @@ mod grpc;
 #[cfg(feature = "milvus-grpc")]
 mod proto;
 
-pub use error::{MilvusErrorContext, MilvusProviderId, map_rest_error};
-pub use index::{MilvusIndexConfig, MilvusIndexSpec};
-pub use metadata::{parse_metadata, serialize_metadata};
-pub use schema::{MilvusSchemaSpec, build_dense_schema_spec, build_hybrid_schema_spec};
-
-#[cfg(feature = "milvus-grpc")]
-pub use error::map_grpc_error;
 #[cfg(feature = "milvus-grpc")]
 pub use grpc::{MilvusGrpcConfig, MilvusGrpcVectorDb};
+pub use index::{MilvusIndexConfig, MilvusIndexSpec};
 
 #[cfg(feature = "milvus-rest")]
 pub use rest::{MilvusRestConfig, MilvusRestVectorDb};

@@ -3,6 +3,7 @@
 //! Test helpers and in-memory adapters.
 //! This crate depends on `ports` and `shared`.
 
+pub mod dfrr_fixtures;
 pub mod errors;
 pub mod in_memory;
 pub mod parity;

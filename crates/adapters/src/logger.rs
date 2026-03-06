@@ -2,7 +2,7 @@
 
 use crate::log_sink::LogSink;
 use semantic_code_ports::{LogEvent, LogFields, LogLevel, LoggerPort};
-use semantic_code_shared::redaction::{REDACTED, is_secret_key};
+use semantic_code_shared::{REDACTED, is_secret_key};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

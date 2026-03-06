@@ -92,7 +92,7 @@ async fn reindex_by_change_indexes_added_files() -> Result<()> {
             },
         )
         .await?;
-    assert!(!results.is_empty());
+    assert!(!results.results.is_empty());
     Ok(())
 }
 

@@ -106,6 +106,16 @@ schema is parsed with `serde` and then validated + normalized in
   - Bounds: `1..=16384`
 - `snapshotStorage` (`disabled` | `project` | `{ custom: "<path>" }`):
   local snapshot persistence mode.
+- `snapshotFormat` (`v1` | `v2`): local snapshot companion format selector.
+- `snapshotMaxBytes` (u64, optional): max bytes per snapshot write.
+  - Bounds: `1..=100000000000`
+- `experimentalU8Search` (bool): enable local experimental quantized search.
+- `vectorKernel` (`hnsw-rs` | `dfrr` | `flat-scan`, optional): local vector kernel family.
+  - Default: `hnsw-rs`
+  - `dfrr` is experimental and requires the `experimental-dfrr-kernel` feature.
+  - `flat-scan` is intended for exact local runs and benchmark ground truth.
+- `forceReindexOnKernelChange` (bool, optional): force full reindex when kernel changes.
+  - Default: `false`
 
 ### `sync`
 

@@ -31,7 +31,7 @@ fn api_v1_json_matches_fixtures() -> Result<(), Box<dyn Error>> {
     });
     assert_eq!(serde_json::to_value(&ok_result)?, fixtures.ok_result);
 
-    let err_result: ApiV1Result<ApiV1IndexResponseDto> = ApiV1Result::err(error_dto.clone());
+    let err_result: ApiV1Result<ApiV1IndexResponseDto> = ApiV1Result::err(error_dto);
     assert_eq!(serde_json::to_value(&err_result)?, fixtures.error_result);
 
     let index_request = ApiV1IndexRequestDto {
@@ -60,7 +60,7 @@ fn api_v1_json_matches_fixtures() -> Result<(), Box<dyn Error>> {
         query: "hello".to_string(),
         top_k: Some(5),
         threshold: Some(0.42),
-        filter_expr: Some("".to_string()),
+        filter_expr: Some(String::new()),
     };
     assert_eq!(
         serde_json::to_value(&search_request)?,

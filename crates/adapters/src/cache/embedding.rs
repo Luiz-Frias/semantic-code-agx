@@ -1,6 +1,7 @@
 use super::{CacheSource, EmbeddingCache};
-use semantic_code_ports::embedding::{EmbeddingPort, EmbeddingVector};
-use semantic_code_ports::{EmbeddingProviderInfo, TelemetryPort, TelemetryTags};
+use semantic_code_ports::{
+    EmbeddingPort, EmbeddingProviderInfo, EmbeddingVector, TelemetryPort, TelemetryTags,
+};
 use semantic_code_shared::{
     ErrorClass, ErrorCode, ErrorEnvelope, Result, RetryPolicy, retry_async_with_observer,
     timeout_with_context,
@@ -173,7 +174,7 @@ impl EmbeddingPort for CachingEmbedding {
     fn detect_dimension(
         &self,
         ctx: &semantic_code_shared::RequestContext,
-        request: semantic_code_ports::embedding::DetectDimensionRequest,
+        request: semantic_code_ports::DetectDimensionRequest,
     ) -> semantic_code_ports::BoxFuture<'_, Result<u32>> {
         let ctx = semantic_code_shared::RequestContext::with_cancellation(
             ctx.correlation_id().clone(),
@@ -201,7 +202,7 @@ impl EmbeddingPort for CachingEmbedding {
     fn embed(
         &self,
         ctx: &semantic_code_shared::RequestContext,
-        request: semantic_code_ports::embedding::EmbedRequest,
+        request: semantic_code_ports::EmbedRequest,
     ) -> semantic_code_ports::BoxFuture<'_, Result<EmbeddingVector>> {
         let ctx = semantic_code_shared::RequestContext::with_cancellation(
             ctx.correlation_id().clone(),
@@ -211,7 +212,14 @@ impl EmbeddingPort for CachingEmbedding {
         Box::pin(async move {
             let ctx_ref = &ctx;
             let key = self.cache_key(&text);
-            if let Some(hit) = self.cache.get(&key).await? {
+            let cache_lookup = self.cache.get(&key).await?;
+            tracing::debug!(
+                operation = "embedding.embed",
+                hit = cache_lookup.is_some(),
+                source = ?cache_lookup.as_ref().map(|entry| entry.source),
+                "embedding cache lookup"
+            );
+            if let Some(hit) = cache_lookup {
                 self.record_cache_hit(hit.source);
                 return Ok(hit.value);
             }
@@ -246,7 +254,7 @@ impl EmbeddingPort for CachingEmbedding {
     fn embed_batch(
         &self,
         ctx: &semantic_code_shared::RequestContext,
-        request: semantic_code_ports::embedding::EmbedBatchRequest,
+        request: semantic_code_ports::EmbedBatchRequest,
     ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<EmbeddingVector>>> {
         let ctx = semantic_code_shared::RequestContext::with_cancellation(
             ctx.correlation_id().clone(),
@@ -261,7 +269,14 @@ impl EmbeddingPort for CachingEmbedding {
 
             for (idx, text) in texts.iter().enumerate() {
                 let key = self.cache_key(text);
-                if let Some(hit) = self.cache.get(&key).await? {
+                let cache_lookup = self.cache.get(&key).await?;
+                tracing::debug!(
+                    operation = "embedding.embed_batch",
+                    hit = cache_lookup.is_some(),
+                    source = ?cache_lookup.as_ref().map(|entry| entry.source),
+                    "embedding cache lookup"
+                );
+                if let Some(hit) = cache_lookup {
                     self.record_cache_hit(hit.source);
                     if let Some(slot) = results.get_mut(idx) {
                         *slot = Some(hit.value);

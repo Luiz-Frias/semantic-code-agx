@@ -32,17 +32,17 @@
 use self::common::{MsgBase, MsgType};
 
 #[path = "milvus.proto.common.rs"]
-pub mod common;
+pub(super) mod common;
 #[path = "milvus.proto.feder.rs"]
-pub mod feder;
+pub(super) mod feder;
 #[path = "milvus.proto.milvus.rs"]
-pub mod milvus;
+pub(super) mod milvus;
 #[path = "milvus.proto.msg.rs"]
-pub mod msg;
+pub(super) mod msg;
 #[path = "milvus.proto.rg.rs"]
-pub mod rg;
+pub(super) mod rg;
 #[path = "milvus.proto.schema.rs"]
-pub mod schema;
+pub(super) mod schema;
 
 impl MsgBase {
     pub fn new(msg_type: MsgType) -> Self {

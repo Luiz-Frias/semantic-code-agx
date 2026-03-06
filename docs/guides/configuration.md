@@ -1,6 +1,6 @@
 # Configuration Guide
 
-This guide covers all configuration options for semantic-code-agx.
+This guide covers all configuration options for semantic-code-agents-rs.
 
 ## Configuration Sources
 

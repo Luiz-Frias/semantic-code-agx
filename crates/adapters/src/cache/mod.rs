@@ -10,7 +10,7 @@ pub use embedding::CachingEmbedding;
 
 use disk::DiskCache;
 use memory::MemoryCache;
-use semantic_code_ports::embedding::EmbeddingVector;
+use semantic_code_ports::EmbeddingVector;
 use semantic_code_shared::Result;
 use sha2::{Digest, Sha256};
 

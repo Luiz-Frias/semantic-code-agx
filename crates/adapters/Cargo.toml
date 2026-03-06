@@ -26,11 +26,13 @@ gemini = ["dep:reqwest"]
 ollama = ["dep:reqwest"]
 voyage = ["dep:reqwest"]
 onnx = ["dep:ort", "dep:tokenizers"]
+ane = ["dep:ane-inference"]
 milvus-rest = ["dep:reqwest"]
 milvus-grpc = ["dep:base64", "dep:bytes", "dep:prost", "dep:tonic"]
 cache-postgres = ["dep:sqlx", "sqlx/postgres"]
 cache-mysql = ["dep:sqlx", "sqlx/mysql"]
 cache-mssql = ["dep:tiberius", "dep:tokio-util", "dep:futures-util"]
+experimental-dfrr-kernel = []
 
 [dependencies]
 semantic-code-ports.workspace = true
@@ -39,6 +41,7 @@ semantic-code-config.workspace = true
 semantic-code-vector.workspace = true
 semantic-code-domain.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 md5.workspace = true
@@ -55,6 +58,7 @@ tree-sitter-typescript.workspace = true
 reqwest = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
+ane-inference = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }

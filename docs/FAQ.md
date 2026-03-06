@@ -2,14 +2,14 @@
 
 ## General
 
-### What is semantic-code-agx?
+### What is semantic-code-agents-rs?
 
 It's a semantic code search engine that uses embeddings and vector databases to find code based on meaning, not keywords. Ask questions like "error handling" and find all error handling code, regardless of the exact variable names or syntax used.
 
 ### How is this different from grep/ripgrep?
 
 - **grep/ripgrep**: Find exact text matches (fast but limited)
-- **semantic-code-agx**: Find by meaning using AI embeddings (powerful but requires computation)
+- **semantic-code-agents-rs**: Find by meaning using AI embeddings (powerful but requires computation)
 
 Use semantic search when:
 - You don't know the exact code name

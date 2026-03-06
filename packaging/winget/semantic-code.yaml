@@ -5,13 +5,13 @@ PackageLocale: en-US
 Publisher: Luiz Frias
 PublisherUrl: https://github.com/Luiz-Frias
 PackageName: Semantic Code
-PackageUrl: https://github.com/Luiz-Frias/semantic-code-agx
+PackageUrl: https://github.com/Luiz-Frias/semantic-code-agents-rs
 License: MIT OR Apache-2.0
 ShortDescription: Semantic code search engine powered by embeddings.
 Installers:
   - Architecture: x64
     InstallerType: zip
-    InstallerUrl: https://github.com/Luiz-Frias/semantic-code-agx/releases/download/v0.0.0/sca-0.0.0-x86_64-pc-windows-msvc.zip
+    InstallerUrl: https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/download/v0.0.0/sca-0.0.0-x86_64-pc-windows-msvc.zip
     InstallerSha256: REPLACE_WITH_SHA256
 Commands:
   - sca

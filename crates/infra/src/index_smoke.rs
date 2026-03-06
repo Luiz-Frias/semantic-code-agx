@@ -1,7 +1,7 @@
 //! In-memory index smoke test used by CLI self-check.
 
 use crate::InfraResult;
-use semantic_code_adapters::self_check::{
+use semantic_code_adapters::{
     SelfCheckEmbedding, SelfCheckFileSync, SelfCheckFileSystem, SelfCheckIgnore,
     SelfCheckPathPolicy, SelfCheckSplitter, SelfCheckVectorDb,
 };
@@ -142,10 +142,11 @@ pub fn run_search_smoke() -> InfraResult<()> {
             query: "ok".into(),
             top_k: Some(3),
             threshold: Some(0.0),
+            query_vector: None,
         };
 
-        let results = semantic_search(&ctx, &deps, input).await?;
-        if results.is_empty() {
+        let output = semantic_search(&ctx, &deps, input).await?;
+        if output.results.is_empty() {
             return Err(ErrorEnvelope::unexpected(
                 ErrorCode::internal(),
                 "search smoke returned no results",

@@ -19,7 +19,7 @@ pub struct SplitEmbeddingRouter {
 
 impl SplitEmbeddingRouter {
     /// Create a new split router.
-    pub fn new(
+    pub(crate) fn new(
         local: Arc<dyn EmbeddingPort>,
         remote: Arc<dyn EmbeddingPort>,
         max_remote_batches: u32,

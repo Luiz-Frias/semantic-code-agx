@@ -1,12 +1,12 @@
 //! Milvus REST auth header helper.
 
-pub struct MilvusRestAuthInput<'a> {
+pub(super) struct MilvusRestAuthInput<'a> {
     pub token: Option<&'a str>,
     pub username: Option<&'a str>,
     pub password: Option<&'a str>,
 }
 
-pub fn build_rest_auth_header(input: &MilvusRestAuthInput<'_>) -> Option<String> {
+pub(super) fn build_rest_auth_header(input: &MilvusRestAuthInput<'_>) -> Option<String> {
     let token = input.token.map(str::trim).filter(|token| !token.is_empty());
     if let Some(token) = token {
         return Some(format!("Bearer {token}"));

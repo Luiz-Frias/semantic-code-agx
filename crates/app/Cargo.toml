@@ -16,9 +16,11 @@ semantic-code-ports.workspace = true
 semantic-code-domain.workspace = true
 semantic-code-shared.workspace = true
 serde_json.workspace = true
+tracing = { workspace = true, features = ["attributes"] }
 
 [dev-dependencies]
 semantic-code-adapters.workspace = true
 semantic-code-config.workspace = true
+semantic-code-vector.workspace = true
 semantic-code-testkit.workspace = true
 tokio.workspace = true

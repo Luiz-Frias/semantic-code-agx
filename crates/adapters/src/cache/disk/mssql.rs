@@ -1,6 +1,6 @@
 use super::{SCHEMA_VERSION, disk_error, legacy_suffix, now_epoch_ms};
 use futures_util::TryStreamExt;
-use semantic_code_ports::embedding::EmbeddingVector;
+use semantic_code_ports::EmbeddingVector;
 use semantic_code_shared::Result;
 use std::sync::Arc;
 use tiberius::{Client, Config, Row as MsRow};

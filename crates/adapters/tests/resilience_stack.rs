@@ -1,11 +1,11 @@
 // Allow missing docs in integration test.
 #![allow(missing_docs)]
 
-use semantic_code_adapters::cache::{CachingEmbedding, EmbeddingCache, EmbeddingCacheConfig};
+use semantic_code_adapters::{CachingEmbedding, EmbeddingCache, EmbeddingCacheConfig};
 use semantic_code_domain::EmbeddingProviderId;
-use semantic_code_ports::EmbeddingPort;
-use semantic_code_ports::embedding::{
-    DetectDimensionRequest, EmbedBatchRequest, EmbedRequest, EmbeddingProviderInfo, EmbeddingVector,
+use semantic_code_ports::{
+    DetectDimensionRequest, EmbedBatchRequest, EmbedRequest, EmbeddingPort, EmbeddingProviderInfo,
+    EmbeddingVector,
 };
 use semantic_code_shared::{
     ErrorClass, ErrorCode, ErrorEnvelope, RequestContext, Result, RetryPolicy,
@@ -83,7 +83,7 @@ async fn resilience_stack_retries_and_caches() -> Result<()> {
         max_entries: 16,
         max_bytes: 1024,
         disk_enabled: false,
-        disk_provider: semantic_code_adapters::cache::DiskCacheProvider::Sqlite,
+        disk_provider: semantic_code_adapters::DiskCacheProvider::Sqlite,
         disk_path: None,
         disk_connection: None,
         disk_table: None,

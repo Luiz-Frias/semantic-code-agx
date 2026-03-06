@@ -3,6 +3,7 @@
 use semantic_code_ports::{CodeChunk, Language, LineSpan, SplitOptions, SplitterPort};
 use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tracing::Instrument;
 use tree_sitter::{Node, Parser, Tree};
 
 const DEFAULT_CHUNK_SIZE: usize = 200;
@@ -53,36 +54,47 @@ impl SplitterPort for TreeSitterSplitter {
         let chunk_overlap = self.chunk_overlap.load(Ordering::Relaxed);
         let max_chunk_chars = self.max_chunk_chars.load(Ordering::Relaxed);
         let ctx = ctx.clone();
-        Box::pin(async move {
-            ctx.ensure_not_cancelled("splitter.start")?;
-            let config = SplitConfig {
-                chunk_size,
-                chunk_overlap,
-            };
-            config.validate()?;
+        let span = tracing::info_span!("adapter.splitter.split", language = ?language);
+        Box::pin(
+            async move {
+                ctx.ensure_not_cancelled("splitter.start")?;
+                let config = SplitConfig {
+                    chunk_size,
+                    chunk_overlap,
+                };
+                config.validate()?;
 
-            let lines = collect_lines(code.as_ref());
-            let line_lengths = line_lengths(&lines);
-            let total_lines = line_count(lines.len())?;
+                let lines = collect_lines(code.as_ref());
+                let line_lengths = line_lengths(&lines);
+                let total_lines = line_count(lines.len())?;
 
-            let mut ranges = parse_tree(code.as_ref(), language, options.file_path.as_deref())
-                .map_or_else(
-                    || split_range(1, total_lines, config.chunk_size, total_lines),
-                    |tree| {
-                        let spans = spans_from_tree(&tree, total_lines);
-                        if spans.is_empty() {
-                            split_range(1, total_lines, config.chunk_size, total_lines)
-                        } else {
-                            merge_ranges(spans, config.chunk_size, total_lines)
-                        }
-                    },
-                );
+                let mut ranges = parse_tree(code.as_ref(), language, options.file_path.as_deref())
+                    .map_or_else(
+                        || split_range(1, total_lines, config.chunk_size, total_lines),
+                        |tree| {
+                            let spans = spans_from_tree(&tree, total_lines);
+                            if spans.is_empty() {
+                                split_range(1, total_lines, config.chunk_size, total_lines)
+                            } else {
+                                merge_ranges(spans, config.chunk_size, total_lines)
+                            }
+                        },
+                    );
 
-            ranges = apply_overlap(ranges, config.chunk_overlap, total_lines);
-            ranges = split_ranges_by_char_limit(ranges, &line_lengths, max_chunk_chars);
+                ranges = apply_overlap(ranges, config.chunk_overlap, total_lines);
+                ranges = split_ranges_by_char_limit(ranges, &line_lengths, max_chunk_chars);
 
-            build_chunks(&ctx, &lines, ranges, language, options.file_path.as_deref())
-        })
+                build_chunks(
+                    &ctx,
+                    &lines,
+                    ranges,
+                    language,
+                    options.file_path.as_deref(),
+                    max_chunk_chars,
+                )
+            }
+            .instrument(span),
+        )
     }
 
     fn set_chunk_size(&self, chunk_size: usize) {
@@ -186,14 +198,46 @@ fn line_count(lines: usize) -> Result<u32> {
 
 fn spans_from_tree(tree: &Tree, total_lines: u32) -> Vec<SpanRange> {
     let root = tree.root_node();
-    let mut cursor = root.walk();
     let mut spans = Vec::new();
-    for child in root.named_children(&mut cursor) {
-        if let Some(span) = span_from_node(child, total_lines) {
+    collect_spans(root, total_lines, &mut spans);
+    spans
+}
+
+fn collect_spans(node: Node<'_>, total_lines: u32, spans: &mut Vec<SpanRange>) {
+    if is_function_like_node(node) {
+        if let Some(span) = span_from_node(node, total_lines) {
             spans.push(span);
         }
+        return;
     }
-    spans
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_spans(child, total_lines, spans);
+    }
+}
+
+fn is_function_like_node(node: Node<'_>) -> bool {
+    match node.kind() {
+        "decorated_definition" => is_decorated_function_definition(node),
+        kind => matches!(
+            kind,
+            "function_item"
+                | "function_declaration"
+                | "function_expression"
+                | "function_definition"
+                | "arrow_function"
+                | "method_declaration"
+                | "method_definition"
+                | "constructor_declaration"
+        ),
+    }
+}
+
+fn is_decorated_function_definition(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(|child| child.kind() == "function_definition")
 }
 
 fn span_from_node(node: Node<'_>, total_lines: u32) -> Option<SpanRange> {
@@ -262,6 +306,40 @@ fn merge_ranges(mut spans: Vec<SpanRange>, chunk_size: usize, total_lines: u32) 
         return split_range(1, total_lines, chunk_size, total_lines);
     }
 
+    fill_range_gaps(output, chunk_size, total_lines)
+}
+
+fn fill_range_gaps(
+    mut ranges: Vec<SpanRange>,
+    chunk_size: usize,
+    total_lines: u32,
+) -> Vec<SpanRange> {
+    if ranges.is_empty() || total_lines == 0 {
+        return ranges;
+    }
+
+    ranges.sort_by_key(|range| range.start);
+    let mut output = Vec::new();
+    let mut cursor = 1u32;
+
+    for range in ranges {
+        let range = clamp_range(range, total_lines);
+        if cursor < range.start {
+            output.extend(split_range(
+                cursor,
+                range.start.saturating_sub(1),
+                chunk_size,
+                total_lines,
+            ));
+        }
+        output.push(range);
+        cursor = cursor.max(range.end.saturating_add(1));
+    }
+
+    if cursor <= total_lines {
+        output.extend(split_range(cursor, total_lines, chunk_size, total_lines));
+    }
+
     output
 }
 
@@ -324,6 +402,32 @@ fn split_ranges_by_char_limit(
                 end: range.end,
             });
         }
+    }
+
+    output
+}
+
+fn split_content_by_max_chars(content: &str, max_chars: usize) -> Vec<Box<str>> {
+    if max_chars == 0 || content.len() <= max_chars {
+        return vec![content.to_owned().into_boxed_str()];
+    }
+
+    let mut output = Vec::new();
+    let mut start = 0usize;
+    while start < content.len() {
+        let mut end = (start + max_chars).min(content.len());
+        while end > start && !content.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        if end == start {
+            end = start.saturating_add(1);
+            while end < content.len() && !content.is_char_boundary(end) {
+                end = end.saturating_add(1);
+            }
+        }
+
+        output.push(content[start..end].to_owned().into_boxed_str());
+        start = end;
     }
 
     output
@@ -395,6 +499,7 @@ fn build_chunks(
     spans: Vec<SpanRange>,
     language: Language,
     file_path: Option<&str>,
+    max_chunk_chars: usize,
 ) -> Result<Vec<CodeChunk>> {
     let file_path = file_path.map(|value| value.to_owned().into_boxed_str());
     let mut chunks = Vec::with_capacity(spans.len());
@@ -402,12 +507,14 @@ fn build_chunks(
         ctx.ensure_not_cancelled("splitter.build_chunks")?;
         let content = content_for_span(lines, span)?;
         let line_span = LineSpan::new(span.start, span.end).map_err(ErrorEnvelope::from)?;
-        chunks.push(CodeChunk {
-            content,
-            span: line_span,
-            language: Some(language),
-            file_path: file_path.clone(),
-        });
+        for content in split_content_by_max_chars(content.as_ref(), max_chunk_chars) {
+            chunks.push(CodeChunk {
+                content,
+                span: line_span,
+                language: Some(language),
+                file_path: file_path.clone(),
+            });
+        }
     }
     Ok(chunks)
 }
@@ -481,6 +588,186 @@ mod tests {
         assert_eq!(out[0].end, 2);
         assert_eq!(out[1].start, 3);
         assert_eq!(out[1].end, 3);
+    }
+
+    #[tokio::test]
+    async fn long_line_is_split_below_max_chars() -> Result<()> {
+        let splitter = TreeSitterSplitter::new(2, 0);
+        splitter.set_max_chunk_chars(50);
+        let ctx = RequestContext::new_request();
+        let line = "a".repeat(123);
+        let chunks = splitter
+            .split(
+                &ctx,
+                line.into_boxed_str(),
+                Language::Text,
+                SplitOptions::default(),
+            )
+            .await?;
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].content.len(), 50);
+        assert_eq!(chunks[1].content.len(), 50);
+        assert_eq!(chunks[2].content.len(), 23);
+        assert!(chunks.iter().all(|chunk| chunk.content.len() <= 50));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_ranges_fills_gaps_around_function_spans() {
+        let spans = vec![SpanRange { start: 5, end: 7 }];
+        let out = merge_ranges(spans, 10, 12);
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].start, 1);
+        assert_eq!(out[0].end, 4);
+        assert_eq!(out[1].start, 5);
+        assert_eq!(out[1].end, 7);
+        assert_eq!(out[2].start, 8);
+        assert_eq!(out[2].end, 12);
+    }
+
+    #[test]
+    fn spans_from_tree_recurses_into_classes_and_methods() {
+        let code = r#"
+struct Calculator;
+
+impl Calculator {
+    fn multiply(&self, lhs: i32, rhs: i32) -> i32 {
+        let product = lhs * rhs;
+        product
+    }
+
+    fn divide(&self, lhs: i32, rhs: i32) -> i32 {
+        let quotient = lhs / rhs;
+        quotient
+    }
+}
+
+fn top_level() -> i32 {
+    42
+}
+"#;
+        let total_lines = line_count(code.lines().count()).expect("code line count");
+        let tree = parse_tree(code, Language::Rust, Some("src/lib.rs")).expect("parse tree");
+
+        let spans = spans_from_tree(&tree, total_lines);
+        let multiply_line = code
+            .lines()
+            .position(|line| line.contains("fn multiply"))
+            .expect("multiply function") as u32
+            + 1;
+        let divide_line = code
+            .lines()
+            .position(|line| line.contains("fn divide"))
+            .expect("divide function") as u32
+            + 1;
+        let top_level_line = code
+            .lines()
+            .position(|line| line.contains("fn top_level"))
+            .expect("top-level function") as u32
+            + 1;
+        let struct_line = code
+            .lines()
+            .position(|line| line.contains("struct Calculator"))
+            .expect("struct declaration") as u32
+            + 1;
+
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].start, multiply_line);
+        assert!(spans[0].end < divide_line);
+        assert_eq!(spans[1].start, divide_line);
+        assert!(spans[1].end < top_level_line);
+        assert_eq!(spans[2].start, top_level_line);
+        assert_ne!(spans[2].start, struct_line);
+    }
+
+    #[test]
+    fn spans_from_tree_detects_javascript_arrow_functions() {
+        let code = r#"
+export const handler = async () => {
+    return 42;
+};
+
+const helper = function () {
+    return "ok";
+};
+"#;
+        let total_lines = line_count(code.lines().count()).expect("code line count");
+        let tree =
+            parse_tree(code, Language::JavaScript, Some("src/handler.js")).expect("parse tree");
+
+        let spans = spans_from_tree(&tree, total_lines);
+        let handler_line = code
+            .lines()
+            .position(|line| line.contains("handler = async () =>"))
+            .expect("handler function") as u32
+            + 1;
+        let helper_line = code
+            .lines()
+            .position(|line| line.contains("helper = function"))
+            .expect("helper function") as u32
+            + 1;
+
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].start, handler_line);
+        assert_eq!(spans[1].start, helper_line);
+    }
+
+    #[test]
+    fn spans_from_tree_keeps_python_decorator_context() {
+        let code = r#"
+@app.route("/api")
+@login_required
+def handler():
+    return "ok"
+"#;
+        let total_lines = line_count(code.lines().count()).expect("code line count");
+        let tree = parse_tree(code, Language::Python, Some("app.py")).expect("parse tree");
+
+        let spans = spans_from_tree(&tree, total_lines);
+        let decorator_line = code
+            .lines()
+            .position(|line| line.contains("@app.route"))
+            .expect("decorator line") as u32
+            + 1;
+        let function_line = code
+            .lines()
+            .position(|line| line.contains("def handler"))
+            .expect("function line") as u32
+            + 1;
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].start, decorator_line);
+        assert!(spans[0].end >= function_line);
+    }
+
+    #[test]
+    fn spans_from_tree_recurses_into_decorated_python_classes() {
+        let code = r#"
+@dataclass
+class Person:
+    def greet(self):
+        return "hi"
+"#;
+        let total_lines = line_count(code.lines().count()).expect("code line count");
+        let tree = parse_tree(code, Language::Python, Some("person.py")).expect("parse tree");
+
+        let spans = spans_from_tree(&tree, total_lines);
+        let class_line = code
+            .lines()
+            .position(|line| line.contains("class Person"))
+            .expect("class line") as u32
+            + 1;
+        let method_line = code
+            .lines()
+            .position(|line| line.contains("def greet"))
+            .expect("method line") as u32
+            + 1;
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].start, method_line);
+        assert_ne!(spans[0].start, class_line);
     }
 
     #[tokio::test]

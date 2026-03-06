@@ -16,6 +16,8 @@ default = []
 milvus = ["milvus-grpc", "milvus-rest"]
 milvus-grpc = ["semantic-code-infra/milvus-grpc"]
 milvus-rest = ["semantic-code-infra/milvus-rest"]
+experimental-dfrr-kernel = ["semantic-code-infra/experimental-dfrr-kernel"]
+ane = ["semantic-code-infra/ane"]
 
 [dependencies]
 semantic-code-infra.workspace = true
@@ -23,5 +25,9 @@ semantic-code-api.workspace = true
 semantic-code-app.workspace = true
 semantic-code-domain.workspace = true
 semantic-code-config.workspace = true
+semantic-code-core.workspace = true
+semantic-code-shared.workspace = true
+tracing.workspace = true
+serde.workspace = true
 
 [dev-dependencies]

@@ -7,7 +7,9 @@
 
 use crate::schema::{
     BackendConfig, EmbeddingCacheDiskProvider, EmbeddingRoutingMode, ValidatedBackendConfig,
+    VectorKernelKind, VectorSearchStrategy,
 };
+use crate::storage::VectorSnapshotFormat;
 use semantic_code_domain::IndexMode;
 use semantic_code_shared::{ErrorCode, ErrorEnvelope, REDACTED_VALUE, SecretString, is_secret_key};
 use std::collections::BTreeMap;
@@ -175,6 +177,19 @@ pub const ENV_VECTOR_DB_TIMEOUT_MS: &str = "SCA_VECTOR_DB_TIMEOUT_MS";
 pub const ENV_VECTOR_DB_INDEX_TIMEOUT_MS: &str = "SCA_VECTOR_DB_INDEX_TIMEOUT_MS";
 /// Env var: vector DB batch size.
 pub const ENV_VECTOR_DB_BATCH_SIZE: &str = "SCA_VECTOR_DB_BATCH_SIZE";
+/// Env var: vector DB local snapshot format (`v1` | `v2`).
+pub const ENV_VECTOR_DB_SNAPSHOT_FORMAT: &str = "SCA_VECTOR_DB_SNAPSHOT_FORMAT";
+/// Env var: max bytes allowed per local snapshot write.
+pub const ENV_VECTOR_DB_SNAPSHOT_MAX_BYTES: &str = "SCA_VECTOR_DB_SNAPSHOT_MAX_BYTES";
+/// Env var: local vector search strategy.
+pub const ENV_VECTOR_DB_SEARCH_STRATEGY: &str = "SCA_VECTOR_DB_SEARCH_STRATEGY";
+/// Env var: local vector kernel family.
+pub const ENV_VECTOR_DB_VECTOR_KERNEL: &str = "SCA_VECTOR_DB_VECTOR_KERNEL";
+/// Env var: enable experimental local u8 search path.
+pub const ENV_VECTOR_DB_EXPERIMENTAL_U8_SEARCH: &str = "SCA_VECTOR_DB_EXPERIMENTAL_U8_SEARCH";
+/// Env var: force full reindex when snapshot kernel metadata differs.
+pub const ENV_VECTOR_DB_FORCE_REINDEX_ON_KERNEL_CHANGE: &str =
+    "SCA_VECTOR_DB_FORCE_REINDEX_ON_KERNEL_CHANGE";
 /// Env var: vector DB base URL.
 pub const ENV_VECTOR_DB_BASE_URL: &str = "SCA_VECTOR_DB_BASE_URL";
 /// Env var: vector DB address/host.
@@ -202,6 +217,102 @@ pub const ENV_SYNC_MAX_FILES: &str = "SCA_SYNC_MAX_FILES";
 pub const ENV_SYNC_MAX_FILE_SIZE_BYTES: &str = "SCA_SYNC_MAX_FILE_SIZE_BYTES";
 
 const MAX_CSV_ITEMS: usize = 10_000;
+const STD_ENV_KEYS: &[&str] = &[
+    ENV_CORE_TIMEOUT_MS,
+    ENV_CORE_MAX_CONCURRENCY,
+    ENV_CORE_MAX_IN_FLIGHT_FILES,
+    ENV_CORE_MAX_IN_FLIGHT_EMBEDDING_BATCHES,
+    ENV_CORE_MAX_IN_FLIGHT_INSERTS,
+    ENV_CORE_MAX_BUFFERED_CHUNKS,
+    ENV_CORE_MAX_BUFFERED_EMBEDDINGS,
+    ENV_CORE_MAX_CHUNK_CHARS,
+    ENV_CORE_RETRY_MAX_ATTEMPTS,
+    ENV_CORE_RETRY_BASE_DELAY_MS,
+    ENV_CORE_RETRY_MAX_DELAY_MS,
+    ENV_CORE_RETRY_JITTER_RATIO_PCT,
+    ENV_EMBEDDING_PROVIDER,
+    ENV_EMBEDDING_PROVIDER_ALIAS,
+    ENV_EMBEDDING_MODEL,
+    ENV_EMBEDDING_MODEL_ALIAS,
+    ENV_EMBEDDING_TIMEOUT_MS,
+    ENV_EMBEDDING_TIMEOUT_MS_ALIAS,
+    ENV_EMBEDDING_BATCH_SIZE,
+    ENV_EMBEDDING_BATCH_SIZE_ALIAS,
+    ENV_EMBEDDING_DIMENSION,
+    ENV_EMBEDDING_DIMENSION_ALIAS,
+    ENV_EMBEDDING_BASE_URL,
+    ENV_EMBEDDING_BASE_URL_ALIAS,
+    ENV_EMBEDDING_LOCAL_FIRST,
+    ENV_EMBEDDING_LOCAL_FIRST_ALIAS,
+    ENV_EMBEDDING_LOCAL_ONLY,
+    ENV_EMBEDDING_LOCAL_ONLY_ALIAS,
+    ENV_EMBEDDING_ROUTING_MODE,
+    ENV_EMBEDDING_ROUTING_MODE_ALIAS,
+    ENV_EMBEDDING_SPLIT_MAX_REMOTE_BATCHES,
+    ENV_EMBEDDING_SPLIT_MAX_REMOTE_BATCHES_ALIAS,
+    ENV_EMBEDDING_JOBS_PROGRESS_INTERVAL_MS,
+    ENV_EMBEDDING_JOBS_PROGRESS_INTERVAL_MS_ALIAS,
+    ENV_EMBEDDING_JOBS_CANCEL_POLL_INTERVAL_MS,
+    ENV_EMBEDDING_JOBS_CANCEL_POLL_INTERVAL_MS_ALIAS,
+    ENV_EMBEDDING_TEST_FALLBACK,
+    ENV_EMBEDDING_TEST_FALLBACK_ALIAS,
+    ENV_EMBEDDING_ONNX_MODEL_DIR,
+    ENV_EMBEDDING_ONNX_MODEL_DIR_ALIAS,
+    ENV_EMBEDDING_ONNX_MODEL_FILENAME,
+    ENV_EMBEDDING_ONNX_MODEL_FILENAME_ALIAS,
+    ENV_EMBEDDING_ONNX_TOK_FILENAME,
+    ENV_EMBEDDING_ONNX_TOK_FILENAME_ALIAS,
+    ENV_EMBEDDING_ONNX_REPO,
+    ENV_EMBEDDING_ONNX_REPO_ALIAS,
+    ENV_EMBEDDING_ONNX_DOWNLOAD,
+    ENV_EMBEDDING_ONNX_DOWNLOAD_ALIAS,
+    ENV_EMBEDDING_ONNX_SESSION_POOL_SIZE,
+    ENV_EMBEDDING_ONNX_SESSION_POOL_SIZE_ALIAS,
+    ENV_EMBEDDING_CACHE_ENABLED,
+    ENV_EMBEDDING_CACHE_MAX_ENTRIES,
+    ENV_EMBEDDING_CACHE_MAX_BYTES,
+    ENV_EMBEDDING_CACHE_DISK_ENABLED,
+    ENV_EMBEDDING_CACHE_DISK_PATH,
+    ENV_EMBEDDING_CACHE_DISK_PROVIDER,
+    ENV_EMBEDDING_CACHE_DISK_CONNECTION,
+    ENV_EMBEDDING_CACHE_DISK_TABLE,
+    ENV_EMBEDDING_CACHE_DISK_MAX_BYTES,
+    ENV_EMBEDDING_API_AUTH,
+    ENV_EMBEDDING_API_AUTH_ALIAS,
+    ENV_OPENAI_API_AUTH,
+    ENV_OPENAI_BASE_URL,
+    ENV_OPENAI_MODEL,
+    ENV_GEMINI_API_AUTH,
+    ENV_GEMINI_BASE_URL,
+    ENV_GEMINI_MODEL,
+    ENV_VOYAGE_API_AUTH,
+    ENV_VOYAGE_BASE_URL,
+    ENV_VOYAGE_MODEL,
+    ENV_OLLAMA_MODEL,
+    ENV_OLLAMA_HOST,
+    ENV_VECTOR_DB_PROVIDER,
+    ENV_VECTOR_DB_INDEX_MODE,
+    ENV_VECTOR_DB_TIMEOUT_MS,
+    ENV_VECTOR_DB_INDEX_TIMEOUT_MS,
+    ENV_VECTOR_DB_BATCH_SIZE,
+    ENV_VECTOR_DB_SNAPSHOT_FORMAT,
+    ENV_VECTOR_DB_SNAPSHOT_MAX_BYTES,
+    ENV_VECTOR_DB_VECTOR_KERNEL,
+    ENV_VECTOR_DB_SEARCH_STRATEGY,
+    ENV_VECTOR_DB_EXPERIMENTAL_U8_SEARCH,
+    ENV_VECTOR_DB_FORCE_REINDEX_ON_KERNEL_CHANGE,
+    ENV_VECTOR_DB_BASE_URL,
+    ENV_VECTOR_DB_ADDRESS,
+    ENV_VECTOR_DB_DATABASE,
+    ENV_VECTOR_DB_SSL,
+    ENV_VECTOR_DB_TOKEN,
+    ENV_VECTOR_DB_USERNAME,
+    ENV_VECTOR_DB_PASSWORD,
+    ENV_SYNC_ALLOWED_EXTENSIONS,
+    ENV_SYNC_IGNORE_PATTERNS,
+    ENV_SYNC_MAX_FILES,
+    ENV_SYNC_MAX_FILE_SIZE_BYTES,
+];
 
 /// Typed env-derived overrides for `BackendConfig`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -322,6 +433,18 @@ pub struct BackendEnv {
     pub vector_db_index_timeout_ms: Option<u64>,
     /// Override for `vectorDb.batchSize`.
     pub vector_db_batch_size: Option<u32>,
+    /// Override for `vectorDb.snapshotFormat`.
+    pub vector_db_snapshot_format: Option<VectorSnapshotFormat>,
+    /// Override for `vectorDb.snapshotMaxBytes`.
+    pub vector_db_snapshot_max_bytes: Option<u64>,
+    /// Override for `vectorDb.vectorKernel`.
+    pub vector_db_vector_kernel: Option<VectorKernelKind>,
+    /// Override for `vectorDb.searchStrategy`.
+    pub vector_db_search_strategy: Option<VectorSearchStrategy>,
+    /// Override for `vectorDb.experimentalU8Search`.
+    pub vector_db_experimental_u8_search: Option<bool>,
+    /// Override for `vectorDb.forceReindexOnKernelChange`.
+    pub vector_db_force_reindex_on_kernel_change: Option<bool>,
     /// Override for `vectorDb.baseUrl`.
     pub vector_db_base_url: Option<Box<str>>,
     /// Override for `vectorDb.address`.
@@ -418,6 +541,12 @@ struct VectorDbEnvOverrides {
     timeout_ms: Option<u64>,
     index_timeout_ms: Option<u64>,
     batch_size: Option<u32>,
+    snapshot_format: Option<VectorSnapshotFormat>,
+    snapshot_max_bytes: Option<u64>,
+    vector_kernel: Option<VectorKernelKind>,
+    search_strategy: Option<VectorSearchStrategy>,
+    experimental_u8_search: Option<bool>,
+    force_reindex_on_kernel_change: Option<bool>,
     base_url: Option<Box<str>>,
     address: Option<Box<str>>,
     database: Option<Box<str>>,
@@ -693,6 +822,15 @@ fn parse_vectordb_env(
         timeout_ms: parse_optional_u64(map, ENV_VECTOR_DB_TIMEOUT_MS)?,
         index_timeout_ms: parse_optional_u64(map, ENV_VECTOR_DB_INDEX_TIMEOUT_MS)?,
         batch_size: parse_optional_u32(map, ENV_VECTOR_DB_BATCH_SIZE)?,
+        snapshot_format: parse_optional_vector_snapshot_format(map, ENV_VECTOR_DB_SNAPSHOT_FORMAT)?,
+        snapshot_max_bytes: parse_optional_u64(map, ENV_VECTOR_DB_SNAPSHOT_MAX_BYTES)?,
+        vector_kernel: parse_optional_vector_kernel_kind(map, ENV_VECTOR_DB_VECTOR_KERNEL)?,
+        search_strategy: parse_optional_vector_search_strategy(map, ENV_VECTOR_DB_SEARCH_STRATEGY)?,
+        experimental_u8_search: parse_optional_bool(map, ENV_VECTOR_DB_EXPERIMENTAL_U8_SEARCH)?,
+        force_reindex_on_kernel_change: parse_optional_bool(
+            map,
+            ENV_VECTOR_DB_FORCE_REINDEX_ON_KERNEL_CHANGE,
+        )?,
         base_url: parse_optional_url_string(map, ENV_VECTOR_DB_BASE_URL)?,
         address: parse_optional_trimmed_string(map, ENV_VECTOR_DB_ADDRESS)?,
         database: parse_optional_trimmed_string(map, ENV_VECTOR_DB_DATABASE)?,
@@ -779,6 +917,12 @@ impl BackendEnv {
             vector_db_timeout_ms: vectordb.timeout_ms,
             vector_db_index_timeout_ms: vectordb.index_timeout_ms,
             vector_db_batch_size: vectordb.batch_size,
+            vector_db_snapshot_format: vectordb.snapshot_format,
+            vector_db_snapshot_max_bytes: vectordb.snapshot_max_bytes,
+            vector_db_vector_kernel: vectordb.vector_kernel,
+            vector_db_search_strategy: vectordb.search_strategy,
+            vector_db_experimental_u8_search: vectordb.experimental_u8_search,
+            vector_db_force_reindex_on_kernel_change: vectordb.force_reindex_on_kernel_change,
             vector_db_base_url: vectordb.base_url,
             vector_db_address: vectordb.address,
             vector_db_database: vectordb.database,
@@ -796,96 +940,7 @@ impl BackendEnv {
     /// Parse env overrides from the current process environment.
     pub fn from_std_env() -> Result<Self, EnvParseError> {
         let mut map = BTreeMap::new();
-        for name in [
-            ENV_CORE_TIMEOUT_MS,
-            ENV_CORE_MAX_CONCURRENCY,
-            ENV_CORE_MAX_IN_FLIGHT_FILES,
-            ENV_CORE_MAX_IN_FLIGHT_EMBEDDING_BATCHES,
-            ENV_CORE_MAX_IN_FLIGHT_INSERTS,
-            ENV_CORE_MAX_BUFFERED_CHUNKS,
-            ENV_CORE_MAX_BUFFERED_EMBEDDINGS,
-            ENV_CORE_MAX_CHUNK_CHARS,
-            ENV_CORE_RETRY_MAX_ATTEMPTS,
-            ENV_CORE_RETRY_BASE_DELAY_MS,
-            ENV_CORE_RETRY_MAX_DELAY_MS,
-            ENV_CORE_RETRY_JITTER_RATIO_PCT,
-            ENV_EMBEDDING_PROVIDER,
-            ENV_EMBEDDING_PROVIDER_ALIAS,
-            ENV_EMBEDDING_MODEL,
-            ENV_EMBEDDING_MODEL_ALIAS,
-            ENV_EMBEDDING_TIMEOUT_MS,
-            ENV_EMBEDDING_TIMEOUT_MS_ALIAS,
-            ENV_EMBEDDING_BATCH_SIZE,
-            ENV_EMBEDDING_BATCH_SIZE_ALIAS,
-            ENV_EMBEDDING_DIMENSION,
-            ENV_EMBEDDING_DIMENSION_ALIAS,
-            ENV_EMBEDDING_BASE_URL,
-            ENV_EMBEDDING_BASE_URL_ALIAS,
-            ENV_EMBEDDING_LOCAL_FIRST,
-            ENV_EMBEDDING_LOCAL_FIRST_ALIAS,
-            ENV_EMBEDDING_LOCAL_ONLY,
-            ENV_EMBEDDING_LOCAL_ONLY_ALIAS,
-            ENV_EMBEDDING_ROUTING_MODE,
-            ENV_EMBEDDING_ROUTING_MODE_ALIAS,
-            ENV_EMBEDDING_SPLIT_MAX_REMOTE_BATCHES,
-            ENV_EMBEDDING_SPLIT_MAX_REMOTE_BATCHES_ALIAS,
-            ENV_EMBEDDING_JOBS_PROGRESS_INTERVAL_MS,
-            ENV_EMBEDDING_JOBS_PROGRESS_INTERVAL_MS_ALIAS,
-            ENV_EMBEDDING_JOBS_CANCEL_POLL_INTERVAL_MS,
-            ENV_EMBEDDING_JOBS_CANCEL_POLL_INTERVAL_MS_ALIAS,
-            ENV_EMBEDDING_TEST_FALLBACK,
-            ENV_EMBEDDING_TEST_FALLBACK_ALIAS,
-            ENV_EMBEDDING_ONNX_MODEL_DIR,
-            ENV_EMBEDDING_ONNX_MODEL_DIR_ALIAS,
-            ENV_EMBEDDING_ONNX_MODEL_FILENAME,
-            ENV_EMBEDDING_ONNX_MODEL_FILENAME_ALIAS,
-            ENV_EMBEDDING_ONNX_TOK_FILENAME,
-            ENV_EMBEDDING_ONNX_TOK_FILENAME_ALIAS,
-            ENV_EMBEDDING_ONNX_REPO,
-            ENV_EMBEDDING_ONNX_REPO_ALIAS,
-            ENV_EMBEDDING_ONNX_DOWNLOAD,
-            ENV_EMBEDDING_ONNX_DOWNLOAD_ALIAS,
-            ENV_EMBEDDING_ONNX_SESSION_POOL_SIZE,
-            ENV_EMBEDDING_ONNX_SESSION_POOL_SIZE_ALIAS,
-            ENV_EMBEDDING_CACHE_ENABLED,
-            ENV_EMBEDDING_CACHE_MAX_ENTRIES,
-            ENV_EMBEDDING_CACHE_MAX_BYTES,
-            ENV_EMBEDDING_CACHE_DISK_ENABLED,
-            ENV_EMBEDDING_CACHE_DISK_PATH,
-            ENV_EMBEDDING_CACHE_DISK_PROVIDER,
-            ENV_EMBEDDING_CACHE_DISK_CONNECTION,
-            ENV_EMBEDDING_CACHE_DISK_TABLE,
-            ENV_EMBEDDING_CACHE_DISK_MAX_BYTES,
-            ENV_EMBEDDING_API_AUTH,
-            ENV_EMBEDDING_API_AUTH_ALIAS,
-            ENV_OPENAI_API_AUTH,
-            ENV_OPENAI_BASE_URL,
-            ENV_OPENAI_MODEL,
-            ENV_GEMINI_API_AUTH,
-            ENV_GEMINI_BASE_URL,
-            ENV_GEMINI_MODEL,
-            ENV_VOYAGE_API_AUTH,
-            ENV_VOYAGE_BASE_URL,
-            ENV_VOYAGE_MODEL,
-            ENV_OLLAMA_MODEL,
-            ENV_OLLAMA_HOST,
-            ENV_VECTOR_DB_PROVIDER,
-            ENV_VECTOR_DB_INDEX_MODE,
-            ENV_VECTOR_DB_TIMEOUT_MS,
-            ENV_VECTOR_DB_INDEX_TIMEOUT_MS,
-            ENV_VECTOR_DB_BATCH_SIZE,
-            ENV_VECTOR_DB_BASE_URL,
-            ENV_VECTOR_DB_ADDRESS,
-            ENV_VECTOR_DB_DATABASE,
-            ENV_VECTOR_DB_SSL,
-            ENV_VECTOR_DB_TOKEN,
-            ENV_VECTOR_DB_USERNAME,
-            ENV_VECTOR_DB_PASSWORD,
-            ENV_SYNC_ALLOWED_EXTENSIONS,
-            ENV_SYNC_IGNORE_PATTERNS,
-            ENV_SYNC_MAX_FILES,
-            ENV_SYNC_MAX_FILE_SIZE_BYTES,
-        ] {
+        for &name in STD_ENV_KEYS {
             if let Ok(value) = std::env::var(name) {
                 map.insert(name.to_string(), value);
             }
@@ -1100,6 +1155,30 @@ fn apply_vector_db_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {
         &mut mapper.config.vector_db.batch_size,
         env.vector_db_batch_size,
     );
+    EnvConfigMapper::set_opt_vector_snapshot_format(
+        &mut mapper.config.vector_db.snapshot_format,
+        env.vector_db_snapshot_format,
+    );
+    EnvConfigMapper::set_opt_u64(
+        &mut mapper.config.vector_db.snapshot_max_bytes,
+        env.vector_db_snapshot_max_bytes,
+    );
+    EnvConfigMapper::set_opt_vector_kernel_kind(
+        &mut mapper.config.vector_db.vector_kernel,
+        env.vector_db_vector_kernel,
+    );
+    EnvConfigMapper::set_opt_vector_search_strategy(
+        &mut mapper.config.vector_db.search_strategy,
+        env.vector_db_search_strategy,
+    );
+    EnvConfigMapper::set_bool(
+        &mut mapper.config.vector_db.experimental_u8_search,
+        env.vector_db_experimental_u8_search,
+    );
+    EnvConfigMapper::set_bool(
+        &mut mapper.config.vector_db.force_reindex_on_kernel_change,
+        env.vector_db_force_reindex_on_kernel_change,
+    );
     EnvConfigMapper::set_opt_box_str(
         &mut mapper.config.vector_db.base_url,
         env.vector_db_base_url.as_deref(),
@@ -1177,8 +1256,41 @@ impl<'a> EnvConfigMapper<'a> {
         }
     }
 
+    const fn set_opt_u64(field: &mut Option<u64>, value: Option<u64>) {
+        if value.is_some() {
+            *field = value;
+        }
+    }
+
     const fn set_opt_index_mode(field: &mut IndexMode, value: Option<IndexMode>) {
         if let Some(value) = value {
+            *field = value;
+        }
+    }
+
+    const fn set_opt_vector_snapshot_format(
+        field: &mut VectorSnapshotFormat,
+        value: Option<VectorSnapshotFormat>,
+    ) {
+        if let Some(value) = value {
+            *field = value;
+        }
+    }
+
+    const fn set_opt_vector_kernel_kind(
+        field: &mut Option<VectorKernelKind>,
+        value: Option<VectorKernelKind>,
+    ) {
+        if value.is_some() {
+            *field = value;
+        }
+    }
+
+    const fn set_opt_vector_search_strategy(
+        field: &mut Option<VectorSearchStrategy>,
+        value: Option<VectorSearchStrategy>,
+    ) {
+        if value.is_some() {
             *field = value;
         }
     }
@@ -1521,6 +1633,86 @@ fn parse_optional_index_mode(
     }
 }
 
+fn parse_optional_vector_snapshot_format(
+    map: &BTreeMap<String, String>,
+    var: &'static str,
+) -> Result<Option<VectorSnapshotFormat>, EnvParseError> {
+    let Some(raw) = map.get(var) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(EnvParseError::EmptyValue { var });
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    let parsed = match normalized.as_str() {
+        "v1" => VectorSnapshotFormat::V1,
+        "v2" => VectorSnapshotFormat::V2,
+        _ => {
+            return Err(EnvParseError::InvalidEnum {
+                var,
+                value: raw.clone(),
+            });
+        },
+    };
+    Ok(Some(parsed))
+}
+
+fn parse_optional_vector_search_strategy(
+    map: &BTreeMap<String, String>,
+    var: &'static str,
+) -> Result<Option<VectorSearchStrategy>, EnvParseError> {
+    let Some(raw) = map.get(var) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(EnvParseError::EmptyValue { var });
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    let parsed = match normalized.as_str() {
+        "f32-hnsw" | "f32_hnsw" => VectorSearchStrategy::F32Hnsw,
+        "u8-exact" | "u8_exact" => VectorSearchStrategy::U8Exact,
+        "u8-then-f32-rerank" | "u8_then_f32_rerank" => VectorSearchStrategy::U8ThenF32Rerank,
+        _ => {
+            return Err(EnvParseError::InvalidEnum {
+                var,
+                value: raw.clone(),
+            });
+        },
+    };
+    Ok(Some(parsed))
+}
+
+fn parse_optional_vector_kernel_kind(
+    map: &BTreeMap<String, String>,
+    var: &'static str,
+) -> Result<Option<VectorKernelKind>, EnvParseError> {
+    let Some(raw) = map.get(var) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(EnvParseError::EmptyValue { var });
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    let parsed = match normalized.as_str() {
+        "hnsw-rs" | "hnsw_rs" => VectorKernelKind::HnswRs,
+        "dfrr" => VectorKernelKind::Dfrr,
+        "flat-scan" | "flat_scan" | "flatscan" => VectorKernelKind::FlatScan,
+        _ => {
+            return Err(EnvParseError::InvalidEnum {
+                var,
+                value: raw.clone(),
+            });
+        },
+    };
+    Ok(Some(parsed))
+}
+
 fn parse_optional_routing_mode_any(
     map: &BTreeMap<String, String>,
     vars: &[&'static str],
@@ -1769,6 +1961,104 @@ mod tests {
         );
         let error = BackendEnv::from_map(&map).err();
         assert!(matches!(error, Some(EnvParseError::InvalidUrl { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_format_env_parses_v2() -> Result<(), Box<dyn Error>> {
+        let mut map = BTreeMap::new();
+        map.insert(ENV_VECTOR_DB_SNAPSHOT_FORMAT.to_string(), "v2".to_string());
+        let env = BackendEnv::from_map(&map)?;
+        assert_eq!(
+            env.vector_db_snapshot_format,
+            Some(VectorSnapshotFormat::V2)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_experimental_u8_env_parses_bool() -> Result<(), Box<dyn Error>> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            ENV_VECTOR_DB_EXPERIMENTAL_U8_SEARCH.to_string(),
+            "true".to_string(),
+        );
+        let env = BackendEnv::from_map(&map)?;
+        assert_eq!(env.vector_db_experimental_u8_search, Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_search_strategy_env_parses_value() -> Result<(), Box<dyn Error>> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            ENV_VECTOR_DB_SEARCH_STRATEGY.to_string(),
+            "u8-then-f32-rerank".to_string(),
+        );
+        let env = BackendEnv::from_map(&map)?;
+        assert_eq!(
+            env.vector_db_search_strategy,
+            Some(VectorSearchStrategy::U8ThenF32Rerank)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_vector_kernel_env_parses_value() -> Result<(), Box<dyn Error>> {
+        let mut map = BTreeMap::new();
+        map.insert(ENV_VECTOR_DB_VECTOR_KERNEL.to_string(), "dfrr".to_string());
+        let env = BackendEnv::from_map(&map)?;
+        assert_eq!(env.vector_db_vector_kernel, Some(VectorKernelKind::Dfrr));
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_force_reindex_env_parses_bool() -> Result<(), Box<dyn Error>> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            ENV_VECTOR_DB_FORCE_REINDEX_ON_KERNEL_CHANGE.to_string(),
+            "true".to_string(),
+        );
+        let env = BackendEnv::from_map(&map)?;
+        assert_eq!(env.vector_db_force_reindex_on_kernel_change, Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_kernel_and_force_reindex_env_overrides_apply_together()
+    -> Result<(), Box<dyn Error>> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            ENV_VECTOR_DB_VECTOR_KERNEL.to_string(),
+            "hnsw-rs".to_string(),
+        );
+        map.insert(
+            ENV_VECTOR_DB_FORCE_REINDEX_ON_KERNEL_CHANGE.to_string(),
+            "true".to_string(),
+        );
+        let env = BackendEnv::from_map(&map)?;
+
+        let mut base = BackendConfig::default();
+        base.vector_db.vector_kernel = Some(VectorKernelKind::Dfrr);
+        let config = apply_env_overrides(base, &env)?;
+
+        assert_eq!(
+            config.vector_db.vector_kernel,
+            Some(VectorKernelKind::HnswRs)
+        );
+        assert!(config.vector_db.force_reindex_on_kernel_change);
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_snapshot_max_bytes_env_parses_u64() -> Result<(), Box<dyn Error>> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            ENV_VECTOR_DB_SNAPSHOT_MAX_BYTES.to_string(),
+            "8192".to_string(),
+        );
+        let env = BackendEnv::from_map(&map)?;
+        assert_eq!(env.vector_db_snapshot_max_bytes, Some(8192));
         Ok(())
     }
 

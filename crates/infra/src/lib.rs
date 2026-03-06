@@ -3,59 +3,39 @@
 //! Infrastructure wiring and runtime composition.
 //! This crate depends on `app`, `adapters`, `config`, and `shared`.
 
+/// EMA persistence strategies for calibrated BQ1 observations.
+mod calibration_persist;
+/// BQ1 calibration persistence helpers for local CLI commands.
+mod cli_calibration;
 /// Local CLI orchestration helpers.
-pub mod cli_local;
+mod cli_local;
 /// CLI manifest helpers for local commands.
-pub mod cli_manifest;
+mod cli_manifest;
 /// Config loading helpers used by CLI surfaces.
-pub mod config_check;
+mod config_check;
 /// Embedding adapter selection helpers.
 mod embedding_factory;
 /// Embedding routing helpers.
 mod embedding_router;
 /// Environment validation helpers used by CLI surfaces.
-pub mod env_check;
+mod env_check;
 /// In-memory index smoke helper for CLI self-check.
-pub mod index_smoke;
+mod index_smoke;
+/// Curated public API boundary.
+mod infra_api;
 /// Background job helpers.
-pub mod jobs;
+mod jobs;
 /// Request validation helpers used by CLI surfaces.
-pub mod request_check;
+mod request_check;
+/// Storage estimation and headroom preflight helpers.
+mod storage_estimate;
 /// Vector DB adapter selection helpers.
 mod vectordb_factory;
 
-pub use cli_local::{
-    CliConfigSummary, CliInitStatus, CliStatus, SnapshotStatus, read_status_local, run_clear_local,
-    run_index_local, run_init_local, run_reindex_local, run_search_local,
-};
-pub use cli_manifest::{
-    CliManifest, append_context_gitignore, config_path, ensure_default_config, manifest_path,
-    read_manifest, touch_manifest, write_manifest,
-};
-pub use config_check::load_effective_config_json;
-pub use embedding_factory::{build_embedding_port, build_embedding_port_with_telemetry};
-pub use env_check::{InfraError, InfraResult, validate_env_parsing};
-pub use index_smoke::{run_clear_smoke, run_index_smoke, run_search_smoke};
-pub use jobs::{
-    JobError, JobKind, JobProgress, JobRequest, JobResult, JobState, JobStatus, cancel_job,
-    create_job, read_job_status, run_job,
-};
-pub use request_check::{RequestKind, ValidatedRequest, validate_request_json};
-pub use vectordb_factory::build_vectordb_port;
+pub use infra_api::*;
 
-// Re-export redaction utilities for CLI boundary sanitization
-pub use semantic_code_shared::{is_secret_key, redact_if_secret};
-
-/// Placeholder module for infrastructure wiring.
-pub mod placeholder {
-    /// Placeholder function to verify the crate compiles.
-    #[must_use]
-    pub const fn infra_crate_version() -> &'static str {
-        env!("CARGO_PKG_VERSION")
-    }
-}
-
-pub use placeholder::infra_crate_version;
+#[cfg(test)]
+mod factory_selection_tests;
 
 #[cfg(test)]
 mod tests {

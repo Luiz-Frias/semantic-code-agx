@@ -1,6 +1,6 @@
 //! Splitter throughput benchmark placeholder.
 
-use semantic_code_adapters::splitter::TreeSitterSplitter;
+use semantic_code_adapters::TreeSitterSplitter;
 use semantic_code_ports::{Language, SplitOptions, SplitterPort};
 use semantic_code_shared::{ErrorEnvelope, RequestContext, Result};
 use std::path::PathBuf;

@@ -1,7 +1,6 @@
 //! Embedding performance benchmarks (mock + ONNX).
 
-use semantic_code_adapters::embedding::onnx::{OnnxEmbedding, OnnxEmbeddingConfig};
-use semantic_code_adapters::embedding_test::TestEmbedding;
+use semantic_code_adapters::{OnnxEmbedding, OnnxEmbeddingConfig, TestEmbedding};
 use semantic_code_ports::EmbeddingPort;
 use semantic_code_shared::{ErrorEnvelope, RequestContext, Result};
 use std::path::{Path, PathBuf};

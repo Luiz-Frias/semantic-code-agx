@@ -17,7 +17,7 @@ use std::time::Duration;
 
 type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-pub type BoxFuture<'a, T> = BoxedFuture<'a, T>;
+pub(super) type BoxFuture<'a, T> = BoxedFuture<'a, T>;
 
 /// Progress update emitted by the index use-case.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +33,7 @@ pub struct IndexProgress {
 }
 
 impl IndexProgress {
-    pub(crate) fn new(phase: impl AsRef<str>, current: u64, total: u64, percentage: u8) -> Self {
+    pub(super) fn new(phase: impl AsRef<str>, current: u64, total: u64, percentage: u8) -> Self {
         Self {
             phase: phase.as_ref().to_owned().into_boxed_str(),
             current,
@@ -181,19 +181,19 @@ pub struct IndexCodebaseDeps {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct IndexingLimits {
-    pub(crate) embedding_batch_size: NonZeroUsize,
-    pub(crate) chunk_limit: NonZeroUsize,
-    pub(crate) max_in_flight_files: NonZeroUsize,
-    pub(crate) max_in_flight_embedding_batches: NonZeroUsize,
-    pub(crate) max_in_flight_inserts: NonZeroUsize,
-    pub(crate) max_pending_embedding_batches: usize,
-    pub(crate) max_pending_insert_batches: usize,
-    pub(crate) prefetch_limit: usize,
+pub(super) struct IndexingLimits {
+    pub(super) embedding_batch_size: NonZeroUsize,
+    pub(super) chunk_limit: NonZeroUsize,
+    pub(super) max_in_flight_files: NonZeroUsize,
+    pub(super) max_in_flight_embedding_batches: NonZeroUsize,
+    pub(super) max_in_flight_inserts: NonZeroUsize,
+    pub(super) max_pending_embedding_batches: usize,
+    pub(super) max_pending_insert_batches: usize,
+    pub(super) prefetch_limit: usize,
 }
 
 impl IndexingLimits {
-    pub(crate) fn from_input(input: &IndexCodebaseInput) -> Self {
+    pub(super) fn from_input(input: &IndexCodebaseInput) -> Self {
         let embedding_batch_size = input.embedding_batch_size;
         let chunk_limit = input.chunk_limit;
         let max_in_flight_files = input.max_in_flight_files.unwrap_or(NonZeroUsize::MIN);
@@ -226,14 +226,14 @@ impl IndexingLimits {
     }
 }
 
-pub struct IndexWorkerPools {
-    pub(crate) embedding: WorkerPool,
-    pub(crate) insert: WorkerPool,
-    pub(crate) files: WorkerPool,
+pub(super) struct IndexWorkerPools {
+    pub(super) embedding: WorkerPool,
+    pub(super) insert: WorkerPool,
+    pub(super) files: WorkerPool,
 }
 
 impl IndexWorkerPools {
-    pub(crate) fn new(ctx: &RequestContext, limits: &IndexingLimits) -> Result<Self> {
+    pub(super) fn new(ctx: &RequestContext, limits: &IndexingLimits) -> Result<Self> {
         let embedding_pool = WorkerPool::new(
             ctx.clone(),
             WorkerPoolOptions {
@@ -269,27 +269,27 @@ impl IndexWorkerPools {
         })
     }
 
-    pub(crate) async fn stop(&self) {
+    pub(super) async fn stop(&self) {
         () = self.files.stop().await;
         () = self.embedding.stop().await;
         () = self.insert.stop().await;
     }
 }
 
-pub struct ProgressTracker {
+pub(super) struct ProgressTracker {
     on_progress: Option<Arc<dyn Fn(IndexProgress) + Send + Sync>>,
     last_percentage: u8,
 }
 
 impl ProgressTracker {
-    pub(crate) fn new(on_progress: Option<Arc<dyn Fn(IndexProgress) + Send + Sync>>) -> Self {
+    pub(super) fn new(on_progress: Option<Arc<dyn Fn(IndexProgress) + Send + Sync>>) -> Self {
         Self {
             on_progress,
             last_percentage: 0,
         }
     }
 
-    pub(crate) fn emit(
+    pub(super) fn emit(
         &mut self,
         phase: &str,
         current: u64,
@@ -308,7 +308,7 @@ impl ProgressTracker {
 }
 
 #[derive(Debug)]
-pub struct IndexStageStatsCollector {
+pub(super) struct IndexStageStatsCollector {
     scan_files: AtomicU64,
     scan_duration_ms: AtomicU64,
     split_files: AtomicU64,
@@ -323,7 +323,7 @@ pub struct IndexStageStatsCollector {
 }
 
 impl IndexStageStatsCollector {
-    pub(crate) const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             scan_files: AtomicU64::new(0),
             scan_duration_ms: AtomicU64::new(0),
@@ -339,34 +339,34 @@ impl IndexStageStatsCollector {
         }
     }
 
-    pub(crate) fn record_scan(&self, files: u64, duration: Duration) {
+    pub(super) fn record_scan(&self, files: u64, duration: Duration) {
         self.scan_files.store(files, Ordering::Release);
         self.scan_duration_ms
             .store(duration_ms(duration), Ordering::Release);
     }
 
-    pub(crate) fn record_split(&self, files: u64, chunks: u64, duration: Duration) {
+    pub(super) fn record_split(&self, files: u64, chunks: u64, duration: Duration) {
         self.split_files.fetch_add(files, Ordering::AcqRel);
         self.split_chunks.fetch_add(chunks, Ordering::AcqRel);
         self.split_duration_ms
             .fetch_add(duration_ms(duration), Ordering::AcqRel);
     }
 
-    pub(crate) fn record_embed(&self, chunks: u64, duration: Duration) {
+    pub(super) fn record_embed(&self, chunks: u64, duration: Duration) {
         self.embed_batches.fetch_add(1, Ordering::AcqRel);
         self.embed_chunks.fetch_add(chunks, Ordering::AcqRel);
         self.embed_duration_ms
             .fetch_add(duration_ms(duration), Ordering::AcqRel);
     }
 
-    pub(crate) fn record_insert(&self, chunks: u64, duration: Duration) {
+    pub(super) fn record_insert(&self, chunks: u64, duration: Duration) {
         self.insert_batches.fetch_add(1, Ordering::AcqRel);
         self.insert_chunks.fetch_add(chunks, Ordering::AcqRel);
         self.insert_duration_ms
             .fetch_add(duration_ms(duration), Ordering::AcqRel);
     }
 
-    pub(crate) fn snapshot(&self) -> IndexStageStats {
+    pub(super) fn snapshot(&self) -> IndexStageStats {
         IndexStageStats {
             scan: ScanStageStats {
                 files: self.scan_files.load(Ordering::Acquire),
@@ -392,18 +392,18 @@ impl IndexStageStatsCollector {
 }
 
 #[derive(Clone)]
-pub struct FileTaskContext<'a> {
-    pub(crate) file_pool: &'a WorkerPool,
-    pub(crate) request_ctx: &'a RequestContext,
-    pub(crate) deps: &'a IndexCodebaseDeps,
-    pub(crate) files: &'a [Box<str>],
-    pub(crate) codebase_root: PathBuf,
-    pub(crate) max_file_size_bytes: Option<u64>,
-    pub(crate) stats: Arc<IndexStageStatsCollector>,
+pub(super) struct FileTaskContext<'a> {
+    pub(super) file_pool: &'a WorkerPool,
+    pub(super) request_ctx: &'a RequestContext,
+    pub(super) deps: &'a IndexCodebaseDeps,
+    pub(super) files: &'a [Box<str>],
+    pub(super) codebase_root: PathBuf,
+    pub(super) max_file_size_bytes: Option<u64>,
+    pub(super) stats: Arc<IndexStageStatsCollector>,
 }
 
 impl<'a> FileTaskContext<'a> {
-    pub(crate) const fn new(
+    pub(super) const fn new(
         file_pool: &'a WorkerPool,
         request_ctx: &'a RequestContext,
         deps: &'a IndexCodebaseDeps,
@@ -424,20 +424,20 @@ impl<'a> FileTaskContext<'a> {
     }
 }
 
-pub struct BatchContext<'a> {
-    pub(crate) ctx: &'a RequestContext,
-    pub(crate) deps: &'a IndexCodebaseDeps,
-    pub(crate) input: &'a IndexCodebaseInput,
-    pub(crate) embedding_pool: &'a WorkerPool,
-    pub(crate) insert_pool: &'a WorkerPool,
-    pub(crate) embedding_batch_size: NonZeroUsize,
-    pub(crate) max_pending_embedding_batches: usize,
-    pub(crate) max_pending_insert_batches: usize,
-    pub(crate) stats: Arc<IndexStageStatsCollector>,
+pub(super) struct BatchContext<'a> {
+    pub(super) ctx: &'a RequestContext,
+    pub(super) deps: &'a IndexCodebaseDeps,
+    pub(super) input: &'a IndexCodebaseInput,
+    pub(super) embedding_pool: &'a WorkerPool,
+    pub(super) insert_pool: &'a WorkerPool,
+    pub(super) embedding_batch_size: NonZeroUsize,
+    pub(super) max_pending_embedding_batches: usize,
+    pub(super) max_pending_insert_batches: usize,
+    pub(super) stats: Arc<IndexStageStatsCollector>,
 }
 
 impl<'a> BatchContext<'a> {
-    pub(crate) const fn new(
+    pub(super) const fn new(
         ctx: &'a RequestContext,
         deps: &'a IndexCodebaseDeps,
         input: &'a IndexCodebaseInput,
@@ -460,16 +460,16 @@ impl<'a> BatchContext<'a> {
     }
 }
 
-pub struct BatchState<'a> {
-    pub(crate) pending: Vec<PendingChunk>,
-    pub(crate) embedding_tasks: Vec<BoxFuture<'a, Result<EmbeddedBatch>>>,
-    pub(crate) insert_tasks: Vec<InsertTask<'a>>,
-    pub(crate) next_batch_to_insert: usize,
-    pub(crate) next_insert_to_await: usize,
+pub(super) struct BatchState<'a> {
+    pub(super) pending: Vec<PendingChunk>,
+    pub(super) embedding_tasks: Vec<BoxFuture<'a, Result<EmbeddedBatch>>>,
+    pub(super) insert_tasks: Vec<InsertTask<'a>>,
+    pub(super) next_batch_to_insert: usize,
+    pub(super) next_insert_to_await: usize,
 }
 
 impl BatchState<'_> {
-    pub(crate) fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             pending: Vec::new(),
             embedding_tasks: Vec::new(),
@@ -481,25 +481,25 @@ impl BatchState<'_> {
 }
 
 #[derive(Debug, Clone)]
-pub struct PendingChunk {
-    pub(crate) relative_path: Box<str>,
-    pub(crate) span: LineSpan,
-    pub(crate) language: Language,
-    pub(crate) content: Chunk<MAX_CHUNK_CHARS>,
-    pub(crate) file_extension: Option<Box<str>>,
+pub(super) struct PendingChunk {
+    pub(super) relative_path: Box<str>,
+    pub(super) span: LineSpan,
+    pub(super) language: Language,
+    pub(super) content: Chunk<MAX_CHUNK_CHARS>,
+    pub(super) file_extension: Option<Box<str>>,
 }
 
 #[derive(Debug)]
-pub struct EmbeddedBatch {
-    pub(crate) documents: Vec<VectorDocumentForInsert>,
+pub(super) struct EmbeddedBatch {
+    pub(super) documents: Vec<VectorDocumentForInsert>,
 }
 
-pub struct InsertTask<'a> {
-    pub(crate) promise: Option<BoxFuture<'a, Result<()>>>,
+pub(super) struct InsertTask<'a> {
+    pub(super) promise: Option<BoxFuture<'a, Result<()>>>,
 }
 
 #[derive(Debug)]
-pub enum FileResult {
+pub(super) enum FileResult {
     Skipped,
     Ok {
         relative_path: Box<str>,
@@ -508,12 +508,12 @@ pub enum FileResult {
     },
 }
 
-pub fn duration_ms(duration: Duration) -> u64 {
+pub(super) fn duration_ms(duration: Duration) -> u64 {
     let millis = duration.as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
-pub fn max_pending_batches(
+pub(super) fn max_pending_batches(
     concurrency: usize,
     max_buffered: Option<usize>,
     batch_size: usize,
@@ -555,17 +555,17 @@ fn progress_percentage(current: u64, total: u64) -> u8 {
     u8::try_from(percent).unwrap_or(u8::MAX)
 }
 
-pub struct IndexRunContext<'a> {
-    pub(crate) ctx: &'a RequestContext,
-    pub(crate) files: &'a [Box<str>],
-    pub(crate) limits: &'a IndexingLimits,
-    pub(crate) file_tasks: FileTaskContext<'a>,
-    pub(crate) batch: BatchContext<'a>,
-    pub(crate) stats: Arc<IndexStageStatsCollector>,
+pub(super) struct IndexRunContext<'a> {
+    pub(super) ctx: &'a RequestContext,
+    pub(super) files: &'a [Box<str>],
+    pub(super) limits: &'a IndexingLimits,
+    pub(super) file_tasks: FileTaskContext<'a>,
+    pub(super) batch: BatchContext<'a>,
+    pub(super) stats: Arc<IndexStageStatsCollector>,
 }
 
 impl<'a> IndexRunContext<'a> {
-    pub(crate) fn new(
+    pub(super) fn new(
         ctx: &'a RequestContext,
         deps: &'a IndexCodebaseDeps,
         input: &'a IndexCodebaseInput,
@@ -604,17 +604,17 @@ impl<'a> IndexRunContext<'a> {
     }
 }
 
-pub struct IndexState<'a> {
-    pub(crate) indexed_files: usize,
-    pub(crate) total_chunks: usize,
-    pub(crate) status: IndexCodebaseStatus,
-    pub(crate) inflight: std::collections::HashMap<usize, BoxFuture<'a, Result<FileResult>>>,
-    pub(crate) next_to_submit: usize,
-    pub(crate) batch: BatchState<'a>,
+pub(super) struct IndexState<'a> {
+    pub(super) indexed_files: usize,
+    pub(super) total_chunks: usize,
+    pub(super) status: IndexCodebaseStatus,
+    pub(super) inflight: std::collections::HashMap<usize, BoxFuture<'a, Result<FileResult>>>,
+    pub(super) next_to_submit: usize,
+    pub(super) batch: BatchState<'a>,
 }
 
 impl IndexState<'_> {
-    pub(crate) fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             indexed_files: 0,
             total_chunks: 0,
@@ -626,20 +626,6 @@ impl IndexState<'_> {
     }
 }
 
-pub struct IndexPipeline<S> {
-    pub(crate) fsm: IndexPipelineFsm,
-    pub(crate) _state: PhantomData<S>,
-}
-
-#[derive(Debug)]
-pub struct IndexPipelineFsm {
-    pub(crate) state: crate::generated::IndexPipelineState,
-}
-
-impl IndexPipelineFsm {
-    pub(crate) const fn new() -> Self {
-        Self {
-            state: crate::generated::IndexPipelineState::Prepared,
-        }
-    }
+pub(super) struct IndexPipeline<S> {
+    pub(super) _state: PhantomData<S>,
 }

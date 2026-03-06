@@ -1,12 +1,12 @@
 {
-  "version": "0.1.1",
+  "version": "0.0.0",
   "description": "Semantic code search engine powered by embeddings.",
-  "homepage": "https://github.com/Luiz-Frias/semantic-code-agx",
+  "homepage": "https://github.com/Luiz-Frias/semantic-code-agents-rs",
   "license": "MIT OR Apache-2.0",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/Luiz-Frias/semantic-code-agx/releases/download/v0.1.1/sca-0.1.1-x86_64-pc-windows-msvc.zip",
-      "hash": "2ede618d15cde1cf31ea723426db123b34d8cf7e5b80acbc3d5a81f5cab0a685"
+      "url": "https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/download/v0.0.0/sca-0.0.0-x86_64-pc-windows-msvc.zip",
+      "hash": "REPLACE_WITH_SHA256"
     }
   },
   "bin": [
@@ -20,7 +20,7 @@
   "autoupdate": {
     "architecture": {
       "64bit": {
-        "url": "https://github.com/Luiz-Frias/semantic-code-agx/releases/download/v$version/sca-$version-x86_64-pc-windows-msvc.zip"
+        "url": "https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/download/v$version/sca-$version-x86_64-pc-windows-msvc.zip"
       }
     }
   }

@@ -2,22 +2,20 @@
 
 use crate::InfraResult;
 use crate::embedding_router::SplitEmbeddingRouter;
-use semantic_code_adapters::cache::{
+use semantic_code_adapters::{
     CachingEmbedding, DiskCacheProvider, EmbeddingCache, EmbeddingCacheConfig,
+    FixedDimensionEmbedding, GeminiEmbedding, GeminiEmbeddingConfig, OllamaEmbedding,
+    OllamaEmbeddingConfig, OnnxEmbedding, OnnxEmbeddingConfig, OpenAiEmbedding,
+    OpenAiEmbeddingConfig, TestEmbedding, VoyageEmbedding, VoyageEmbeddingConfig,
 };
-use semantic_code_adapters::embedding::fixed::FixedDimensionEmbedding;
-use semantic_code_adapters::embedding::gemini::{GeminiEmbedding, GeminiEmbeddingConfig};
-use semantic_code_adapters::embedding::ollama::{OllamaEmbedding, OllamaEmbeddingConfig};
-use semantic_code_adapters::embedding::onnx::{OnnxEmbedding, OnnxEmbeddingConfig};
-use semantic_code_adapters::embedding::openai::{OpenAiEmbedding, OpenAiEmbeddingConfig};
-use semantic_code_adapters::embedding::voyage::{VoyageEmbedding, VoyageEmbeddingConfig};
-use semantic_code_adapters::embedding_test::TestEmbedding;
 use semantic_code_config::{
-    BackendEnv, EmbeddingCacheDiskProvider, EmbeddingConfig, EmbeddingRoutingMode,
+    EmbeddingCacheDiskProvider, EmbeddingConfig, EmbeddingRoutingMode, RuntimeEnv,
     ValidatedBackendConfig,
 };
 use semantic_code_ports::{EmbeddingPort, TelemetryPort};
 use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RetryPolicy, SecretString};
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -30,12 +28,25 @@ const CONTEXT_DIR: &str = ".context";
 const MODELS_DIR: &str = "models";
 const ONNX_MODELS_DIR: &str = "onnx";
 const ONNX_CACHE_DIR: &str = "onnx-cache";
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+const ENV_EMBEDDING_ANE_SEQUENCE_LENGTH: &str = "SCA_EMBEDDING_ANE_SEQUENCE_LENGTH";
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+const ENV_EMBEDDING_ANE_MAX_IN_FLIGHT_EVALS: &str = "SCA_EMBEDDING_ANE_MAX_IN_FLIGHT_EVALS";
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+const ENV_EMBEDDING_ANE_BATCH_PIPELINE_DEPTH: &str = "SCA_EMBEDDING_ANE_BATCH_PIPELINE_DEPTH";
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+const ENV_EMBEDDING_ANE_CONDUCTOR_MIN_BATCH: &str = "SCA_EMBEDDING_ANE_CONDUCTOR_MIN_BATCH";
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+const ENV_EMBEDDING_ANE_CONDUCTOR_CPU_POP_LIMIT: &str = "SCA_EMBEDDING_ANE_CONDUCTOR_CPU_POP_LIMIT";
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+const ENV_EMBEDDING_ANE_EXECUTION_MODE: &str = "SCA_EMBEDDING_ANE_EXECUTION_MODE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderKind {
     Auto,
     Test,
     Onnx,
+    Ane,
     OpenAi,
     Gemini,
     Voyage,
@@ -49,19 +60,133 @@ enum LocalMode {
     Only,
 }
 
-/// Build an embedding port using config and env overrides.
-pub fn build_embedding_port(
-    config: &ValidatedBackendConfig,
-    env: &BackendEnv,
-    codebase_root: &Path,
-) -> InfraResult<Arc<dyn EmbeddingPort>> {
-    build_embedding_port_with_telemetry(config, env, codebase_root, None)
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+fn parse_env_u32(name: &str, default: u32) -> u32 {
+    if let Ok(value) = std::env::var(name) {
+        if let Ok(parsed) = value.parse::<u32>()
+            && parsed > 0
+        {
+            return parsed;
+        }
+        tracing::warn!(
+            env = name,
+            value = %value,
+            "invalid ANE numeric env override; using default",
+        );
+    }
+    default
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+fn parse_env_non_zero_usize(name: &str, default: NonZeroUsize) -> NonZeroUsize {
+    if let Ok(value) = std::env::var(name) {
+        if let Ok(parsed) = value.parse::<usize>() {
+            return NonZeroUsize::new(parsed).unwrap_or_else(|| {
+                tracing::warn!(
+                    env = name,
+                    value = %value,
+                    "ANE env override must be > 0; using default",
+                );
+                default
+            });
+        }
+        tracing::warn!(
+            env = name,
+            value = %value,
+            "invalid ANE numeric env override; using default",
+        );
+    }
+    default
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+fn parse_optional_non_zero_usize_value(name: &str, value: &str) -> Option<NonZeroUsize> {
+    value.parse::<usize>().map_or_else(
+        |_| {
+            tracing::warn!(
+                env = name,
+                value = %value,
+                "invalid ANE numeric env override; ignoring value",
+            );
+            None
+        },
+        |parsed| {
+            NonZeroUsize::new(parsed).or_else(|| {
+                tracing::warn!(
+                    env = name,
+                    value = %value,
+                    "ANE env override must be > 0; ignoring value",
+                );
+                None
+            })
+        },
+    )
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+fn parse_env_optional_non_zero_usize(name: &str) -> Option<NonZeroUsize> {
+    std::env::var(name).map_or(None, |value| {
+        parse_optional_non_zero_usize_value(name, &value)
+    })
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+fn default_ane_max_in_flight_evals(sequence_length: u32) -> NonZeroUsize {
+    if sequence_length <= 128 {
+        NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN)
+    } else {
+        NonZeroUsize::MIN
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+fn parse_ane_execution_mode() -> (semantic_code_adapters::AneExecutionMode, &'static str) {
+    use semantic_code_adapters::AneExecutionMode;
+
+    std::env::var(ENV_EMBEDDING_ANE_EXECUTION_MODE).ok().map_or(
+        (AneExecutionMode::AneQueueExperimental, "pipeline"),
+        |raw| {
+            let normalized = raw.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "serial" | "serial_compat" => (AneExecutionMode::SerialCompat, "serial"),
+                "pipeline" => (AneExecutionMode::AneQueueExperimental, "pipeline"),
+                "conductor" | "conductor_pipeline" => {
+                    (AneExecutionMode::ConductorPipeline, "conductor")
+                },
+                "cpu_overlap" | "overlap" | "ane_queue_experimental" | "ane_queue" | "queue" => {
+                    tracing::info!(
+                        env = ENV_EMBEDDING_ANE_EXECUTION_MODE,
+                        value = %raw,
+                        resolved = "pipeline",
+                        "mapped ANE execution mode alias"
+                    );
+                    (AneExecutionMode::AneQueueExperimental, "pipeline")
+                },
+                _ => {
+                    tracing::warn!(
+                        env = ENV_EMBEDDING_ANE_EXECUTION_MODE,
+                        value = %raw,
+                        "invalid ANE execution mode override; using pipeline",
+                    );
+                    (AneExecutionMode::AneQueueExperimental, "pipeline")
+                },
+            }
+        },
+    )
 }
 
 /// Build an embedding port and attach telemetry hooks when provided.
+#[tracing::instrument(
+    name = "embedding.factory",
+    skip_all,
+    fields(
+        provider = config.embedding.provider.as_deref().unwrap_or("auto"),
+        routing_mode = ?config.embedding.routing.mode,
+    )
+)]
 pub fn build_embedding_port_with_telemetry(
     config: &ValidatedBackendConfig,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
     codebase_root: &Path,
     telemetry: Option<Arc<dyn TelemetryPort>>,
 ) -> InfraResult<Arc<dyn EmbeddingPort>> {
@@ -85,6 +210,7 @@ pub fn build_embedding_port_with_telemetry(
             TestEmbedding::new(embed_dimension(config))?,
         )),
         ProviderKind::Onnx => build_onnx(config, codebase_root, allow_test_fallback),
+        ProviderKind::Ane => build_ane(config, codebase_root, allow_test_fallback),
         ProviderKind::Auto => {
             build_auto(config, env, codebase_root, local_mode, allow_test_fallback)
         },
@@ -127,7 +253,7 @@ pub fn build_embedding_port_with_telemetry(
 
 fn build_auto(
     config: &ValidatedBackendConfig,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
     codebase_root: &Path,
     local_mode: LocalMode,
     allow_test_fallback: bool,
@@ -160,7 +286,7 @@ fn build_auto(
 
 fn build_split_embedding_port(
     config: &ValidatedBackendConfig,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
     codebase_root: &Path,
     provider: ProviderKind,
     telemetry: Option<Arc<dyn TelemetryPort>>,
@@ -193,7 +319,7 @@ fn build_split_embedding_port(
 
 fn resolve_split_remote_provider(
     provider: ProviderKind,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
 ) -> InfraResult<ProviderKind> {
     match provider {
         ProviderKind::OpenAi
@@ -206,16 +332,18 @@ fn resolve_split_remote_provider(
                 "split routing requires a configured remote provider",
             )
         }),
-        ProviderKind::Onnx | ProviderKind::Test => Err(ErrorEnvelope::expected(
-            ErrorCode::invalid_input(),
-            "split routing requires a remote embedding provider",
-        )),
+        ProviderKind::Onnx | ProviderKind::Ane | ProviderKind::Test => {
+            Err(ErrorEnvelope::expected(
+                ErrorCode::invalid_input(),
+                "split routing requires a remote embedding provider",
+            ))
+        },
     }
 }
 
 fn build_remote_with_fallback(
     config: &ValidatedBackendConfig,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
     codebase_root: &Path,
     local_mode: LocalMode,
     provider: ProviderKind,
@@ -260,7 +388,7 @@ fn build_remote_with_fallback(
 
 fn build_remote(
     config: &ValidatedBackendConfig,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
     provider: ProviderKind,
 ) -> InfraResult<Arc<dyn EmbeddingPort>> {
     match provider {
@@ -323,7 +451,7 @@ fn build_remote(
 fn wrap_with_resilience(
     port: Arc<dyn EmbeddingPort>,
     config: &ValidatedBackendConfig,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
     codebase_root: &Path,
     telemetry: Option<Arc<dyn TelemetryPort>>,
 ) -> InfraResult<Arc<dyn EmbeddingPort>> {
@@ -353,7 +481,7 @@ fn wrap_with_resilience(
 fn build_cache_namespace(
     port: &Arc<dyn EmbeddingPort>,
     config: &ValidatedBackendConfig,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
 ) -> Box<str> {
     let provider = port.provider().id.as_str();
     let provider_kind = match provider {
@@ -447,7 +575,7 @@ fn default_cache_path(codebase_root: &Path) -> PathBuf {
         .join("cache.db")
 }
 
-fn remote_ready(provider: ProviderKind, env: &BackendEnv) -> bool {
+fn remote_ready(provider: ProviderKind, env: &RuntimeEnv) -> bool {
     match provider {
         ProviderKind::OpenAi | ProviderKind::Gemini | ProviderKind::Voyage => {
             resolve_api_key(provider, env).is_some()
@@ -457,7 +585,7 @@ fn remote_ready(provider: ProviderKind, env: &BackendEnv) -> bool {
     }
 }
 
-fn resolve_api_key(provider: ProviderKind, env: &BackendEnv) -> Option<SecretString> {
+fn resolve_api_key(provider: ProviderKind, env: &RuntimeEnv) -> Option<SecretString> {
     match provider {
         ProviderKind::OpenAi => env
             .openai_api_key
@@ -478,7 +606,7 @@ fn resolve_api_key(provider: ProviderKind, env: &BackendEnv) -> Option<SecretStr
 fn resolve_model(
     provider: ProviderKind,
     config: &EmbeddingConfig,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
 ) -> Option<Box<str>> {
     match provider {
         ProviderKind::OpenAi => env.openai_model.clone().or_else(|| config.model.clone()),
@@ -492,7 +620,7 @@ fn resolve_model(
 fn resolve_base_url(
     provider: ProviderKind,
     config: &EmbeddingConfig,
-    env: &BackendEnv,
+    env: &RuntimeEnv,
 ) -> Option<Box<str>> {
     match provider {
         ProviderKind::OpenAi => env
@@ -512,7 +640,7 @@ fn resolve_base_url(
     }
 }
 
-const fn auto_remote_provider(env: &BackendEnv) -> Option<ProviderKind> {
+const fn auto_remote_provider(env: &RuntimeEnv) -> Option<ProviderKind> {
     if env.openai_api_key.is_some() || env.embedding_api_key.is_some() {
         return Some(ProviderKind::OpenAi);
     }
@@ -543,6 +671,99 @@ fn build_onnx(
             ))
         },
         Err(error) => Err(error),
+    }
+}
+
+// TODO(explore): When ANE proves stable, add ANE to build_auto() local-first chain
+// before ONNX. This would make ANE the preferred local provider on Apple Silicon,
+// falling back to ONNX if ANE init fails.
+fn build_ane(
+    config: &ValidatedBackendConfig,
+    codebase_root: &Path,
+    allow_test_fallback: bool,
+) -> InfraResult<Arc<dyn EmbeddingPort>> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+    {
+        use semantic_code_adapters::{AneEmbedding, AneEmbeddingConfig};
+
+        let (preferred_dir, legacy_dir) = resolve_onnx_model_dirs(codebase_root, &config.embedding);
+        let model_dir = if preferred_dir.join("model.safetensors").exists() {
+            preferred_dir
+        } else if let Some(ref legacy) = legacy_dir {
+            if legacy.join("model.safetensors").exists() {
+                legacy.clone()
+            } else {
+                return Err(ErrorEnvelope::expected(
+                    ErrorCode::new("embedding", "ane_model_missing"),
+                    format!(
+                        "ANE requires model.safetensors in model dir. \
+                         Run: python3 scripts/convert-onnx-to-safetensors.py {}",
+                        preferred_dir.display()
+                    ),
+                ));
+            }
+        } else {
+            return Err(ErrorEnvelope::expected(
+                ErrorCode::new("embedding", "ane_model_missing"),
+                "ANE model directory not found",
+            ));
+        };
+
+        let sequence_length = parse_env_u32(ENV_EMBEDDING_ANE_SEQUENCE_LENGTH, 128);
+        let max_in_flight_evals = parse_env_non_zero_usize(
+            ENV_EMBEDDING_ANE_MAX_IN_FLIGHT_EVALS,
+            default_ane_max_in_flight_evals(sequence_length),
+        );
+        let batch_pipeline_depth = parse_env_non_zero_usize(
+            ENV_EMBEDDING_ANE_BATCH_PIPELINE_DEPTH,
+            NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
+        );
+        let conductor_min_batch =
+            parse_env_optional_non_zero_usize(ENV_EMBEDDING_ANE_CONDUCTOR_MIN_BATCH);
+        let conductor_cpu_pop_limit =
+            parse_env_non_zero_usize(ENV_EMBEDDING_ANE_CONDUCTOR_CPU_POP_LIMIT, NonZeroUsize::MIN);
+        let (execution_mode, resolved_mode) = parse_ane_execution_mode();
+        tracing::info!(
+            resolved_mode = resolved_mode,
+            max_in_flight_evals = max_in_flight_evals.get(),
+            batch_pipeline_depth = batch_pipeline_depth.get(),
+            conductor_min_batch = conductor_min_batch.map(NonZeroUsize::get),
+            conductor_cpu_pop_limit = conductor_cpu_pop_limit.get(),
+            sequence_length = sequence_length,
+            "resolved ANE execution settings"
+        );
+
+        let ane_config = AneEmbeddingConfig {
+            model_dir,
+            dimension: config.embedding.dimension,
+            sequence_length,
+            max_in_flight_evals,
+            batch_pipeline_depth,
+            conductor_min_batch,
+            conductor_cpu_pop_limit,
+            execution_mode,
+        };
+
+        match AneEmbedding::new(&ane_config) {
+            Ok(ane) => Ok(wrap_embedding_fixed(config.embedding.dimension, ane)),
+            Err(error) if allow_test_fallback => {
+                tracing::warn!(?error, "ANE init failed, falling back to test embedding");
+                Ok(wrap_embedding_fixed(
+                    Some(embed_dimension(config)),
+                    TestEmbedding::new(embed_dimension(config))?,
+                ))
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64", feature = "ane")))]
+    {
+        let _ = (config, codebase_root, allow_test_fallback);
+        Err(ErrorEnvelope::expected(
+            ErrorCode::new("embedding", "ane_not_available"),
+            "ANE embedding requires macOS on Apple Silicon with the 'ane' feature enabled",
+        ))
     }
 }
 
@@ -581,7 +802,7 @@ fn try_build_onnx(
             .unwrap_or(DEFAULT_ONNX_REPO);
         let warnings = download_onnx_assets(repo, &model_dir)?;
         for warning in warnings {
-            eprintln!("warning: {warning}");
+            tracing::warn!(warning = %warning, "ONNX asset download warning");
         }
     }
 
@@ -672,11 +893,10 @@ fn resolve_onnx_model_dirs(
 ) -> (PathBuf, Option<PathBuf>) {
     // TODO: refactor repeated Option selection with a mapper helper.
     if let Some(model_dir) = config.onnx.model_dir.as_deref() {
-        let path = PathBuf::from(model_dir);
-        if path.is_absolute() {
-            return (path, None);
-        }
-        return (codebase_root.join(path), None);
+        return (
+            resolve_explicit_onnx_model_dir(codebase_root, model_dir),
+            None,
+        );
     }
     let repo = config.onnx.repo.as_deref().unwrap_or(DEFAULT_ONNX_REPO);
     let slug = repo.replace('/', "-");
@@ -690,6 +910,34 @@ fn resolve_onnx_model_dirs(
         .join(ONNX_CACHE_DIR)
         .join(&slug);
     (preferred, Some(legacy))
+}
+
+fn resolve_explicit_onnx_model_dir(codebase_root: &Path, model_dir: &str) -> PathBuf {
+    let path = PathBuf::from(model_dir);
+    if path.is_absolute() {
+        return path;
+    }
+
+    let codebase_relative = codebase_root.join(&path);
+    if codebase_relative.exists() {
+        return codebase_relative;
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_relative = cwd.join(&path);
+        if cwd_relative.exists() {
+            tracing::debug!(
+                model_dir = model_dir,
+                codebase_root = %codebase_root.display(),
+                cwd = %cwd.display(),
+                resolved = %cwd_relative.display(),
+                "resolved explicit ONNX model dir relative to current working directory"
+            );
+            return cwd_relative;
+        }
+    }
+
+    codebase_relative
 }
 
 fn download_onnx_assets(repo: &str, model_dir: &Path) -> InfraResult<Vec<String>> {
@@ -711,8 +959,11 @@ fn download_onnx_assets(repo: &str, model_dir: &Path) -> InfraResult<Vec<String>
 
     for filename in required {
         if let Err(error) = run_hf_download(repo, filename, model_dir) {
-            eprintln!(
-                "error: required ONNX asset download failed (repo={repo}, file={filename}): {error}"
+            tracing::error!(
+                repo = %repo,
+                filename = %filename,
+                error = %error,
+                "required ONNX asset download failed"
             );
             return Err(error);
         }
@@ -799,6 +1050,7 @@ fn parse_provider(value: Option<&str>) -> InfraResult<ProviderKind> {
         "auto" => Ok(ProviderKind::Auto),
         "test" => Ok(ProviderKind::Test),
         "onnx" | "local" => Ok(ProviderKind::Onnx),
+        "ane" | "neural-engine" => Ok(ProviderKind::Ane),
         "openai" => Ok(ProviderKind::OpenAi),
         "gemini" => Ok(ProviderKind::Gemini),
         "voyage" | "voyageai" => Ok(ProviderKind::Voyage),
@@ -828,6 +1080,10 @@ fn missing_provider_error(provider: ProviderKind) -> ErrorEnvelope {
         ProviderKind::Voyage => "Voyage API key is required".to_string(),
         ProviderKind::Ollama => "embedding provider ollama is not configured".to_string(),
         ProviderKind::Onnx => "embedding provider onnx is not configured".to_string(),
+        ProviderKind::Ane => {
+            "ANE embedding requires macOS on Apple Silicon with the 'ane' feature enabled"
+                .to_string()
+        },
         ProviderKind::Auto => "embedding provider auto is not configured".to_string(),
         ProviderKind::Test => "embedding provider test is not configured".to_string(),
     };
@@ -879,6 +1135,14 @@ mod tests {
     use super::*;
     use semantic_code_ports::DetectDimensionOptions;
     use semantic_code_shared::RequestContext;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_suffix() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    }
 
     #[tokio::test]
     async fn fixed_embedding_wrapper_reports_expected_dimension() -> InfraResult<()> {
@@ -902,5 +1166,62 @@ mod tests {
             .await?;
         assert_eq!(dimension, 777);
         Ok(())
+    }
+
+    #[test]
+    fn explicit_onnx_model_dir_prefers_codebase_relative_path() {
+        let root = std::env::temp_dir().join(format!("sca-onnx-codebase-{}", unique_suffix()));
+        let rel = PathBuf::from("models/onnx/x");
+        let target = root.join(&rel);
+        let create_result = std::fs::create_dir_all(&target);
+        assert!(create_result.is_ok());
+
+        let resolved = resolve_explicit_onnx_model_dir(&root, &rel.to_string_lossy());
+        assert_eq!(resolved, target);
+    }
+
+    #[test]
+    fn explicit_onnx_model_dir_falls_back_to_cwd_when_codebase_path_missing() {
+        let root = std::env::temp_dir().join(format!("sca-onnx-missing-{}", unique_suffix()));
+        let cwd = match std::env::current_dir() {
+            Ok(cwd) => cwd,
+            Err(error) => panic!("current dir unavailable: {error}"),
+        };
+        let rel = format!(".context/test-onnx-model-{}", unique_suffix());
+        let cwd_target = cwd.join(&rel);
+        let create_result = std::fs::create_dir_all(&cwd_target);
+        assert!(create_result.is_ok());
+
+        let resolved = resolve_explicit_onnx_model_dir(&root, &rel);
+        assert_eq!(resolved, cwd_target);
+
+        let _ = std::fs::remove_dir_all(&cwd_target);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+    #[test]
+    fn parse_optional_non_zero_usize_value_ignores_zero() {
+        assert_eq!(
+            parse_optional_non_zero_usize_value(ENV_EMBEDDING_ANE_CONDUCTOR_MIN_BATCH, "0"),
+            None
+        );
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+    #[test]
+    fn parse_optional_non_zero_usize_value_ignores_invalid_value() {
+        assert_eq!(
+            parse_optional_non_zero_usize_value(ENV_EMBEDDING_ANE_CONDUCTOR_MIN_BATCH, "abc"),
+            None
+        );
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "ane"))]
+    #[test]
+    fn parse_optional_non_zero_usize_value_returns_value() {
+        assert_eq!(
+            parse_optional_non_zero_usize_value(ENV_EMBEDDING_ANE_CONDUCTOR_MIN_BATCH, "4"),
+            NonZeroUsize::new(4)
+        );
     }
 }

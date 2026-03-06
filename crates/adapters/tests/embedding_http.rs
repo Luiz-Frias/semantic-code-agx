@@ -3,8 +3,8 @@
 
 #[cfg(feature = "openai")]
 mod openai {
-    use semantic_code_adapters::embedding::openai::{OpenAiEmbedding, OpenAiEmbeddingConfig};
-    use semantic_code_ports::embedding::EmbeddingPort;
+    use semantic_code_adapters::{OpenAiEmbedding, OpenAiEmbeddingConfig};
+    use semantic_code_ports::EmbeddingPort;
     use semantic_code_shared::{RequestContext, Result};
     use serde_json::json;
     use wiremock::matchers::{body_json, header, method, path};
@@ -49,8 +49,8 @@ mod openai {
 
 #[cfg(feature = "gemini")]
 mod gemini {
-    use semantic_code_adapters::embedding::gemini::{GeminiEmbedding, GeminiEmbeddingConfig};
-    use semantic_code_ports::embedding::{EmbedBatchRequest, EmbeddingPort};
+    use semantic_code_adapters::{GeminiEmbedding, GeminiEmbeddingConfig};
+    use semantic_code_ports::{EmbedBatchRequest, EmbeddingPort};
     use semantic_code_shared::{RequestContext, Result};
     use serde_json::json;
     use wiremock::matchers::{body_json, header, method, path};
@@ -109,8 +109,8 @@ mod gemini {
 
 #[cfg(feature = "ollama")]
 mod ollama {
-    use semantic_code_adapters::embedding::ollama::{OllamaEmbedding, OllamaEmbeddingConfig};
-    use semantic_code_ports::embedding::EmbeddingPort;
+    use semantic_code_adapters::{OllamaEmbedding, OllamaEmbeddingConfig};
+    use semantic_code_ports::EmbeddingPort;
     use semantic_code_shared::{RequestContext, Result};
     use serde_json::json;
     use wiremock::matchers::{body_json, method, path};
@@ -150,8 +150,8 @@ mod ollama {
 
 #[cfg(feature = "voyage")]
 mod voyage {
-    use semantic_code_adapters::embedding::voyage::{VoyageEmbedding, VoyageEmbeddingConfig};
-    use semantic_code_ports::embedding::{EmbedBatchRequest, EmbeddingPort};
+    use semantic_code_adapters::{VoyageEmbedding, VoyageEmbeddingConfig};
+    use semantic_code_ports::{EmbedBatchRequest, EmbeddingPort};
     use semantic_code_shared::{RequestContext, Result};
     use serde_json::json;
     use wiremock::matchers::{body_json, header, method, path};

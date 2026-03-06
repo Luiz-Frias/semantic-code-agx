@@ -10,9 +10,25 @@ const DEFAULT_FIXTURE_REPO: &str = "tmp/dspy/dspy";
 const ENV_FIXTURE_REPO: &str = "SCA_E2E_FIXTURE_REPO";
 const DEFAULT_ONNX_REPO_SLUG: &str = "Xenova-all-MiniLM-L6-v2";
 const DEFAULT_MILVUS_ADDRESS: &str = "127.0.0.1:19530";
+const MILVUS_READY_RETRIES: u32 = 120;
+const MILVUS_PROXY_RETRY_ATTEMPTS: u32 = 15;
+const MILVUS_PROXY_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 fn milvus_enabled() -> bool {
     cfg!(feature = "milvus-grpc") || cfg!(feature = "milvus-rest")
+}
+
+/// Quick probe: try a single TCP connect with a short timeout.
+/// Returns `true` if Milvus gRPC port is reachable right now.
+fn milvus_reachable(address: &str) -> bool {
+    let normalized = normalize_milvus_address(address);
+    let Ok(mut addrs) = normalized.to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok()
 }
 
 fn run_cli_in_dir_with_env(
@@ -102,14 +118,39 @@ fn assert_command_success(output: &std::process::Output, label: &str) {
     panic!("{label} failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
 }
 
+fn is_milvus_proxy_not_ready(output: &std::process::Output) -> bool {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stdout.contains("Milvus Proxy is not ready yet")
+        || stderr.contains("Milvus Proxy is not ready yet")
+}
+
+fn run_cli_with_milvus_proxy_retry(
+    dir: &Path,
+    args: &[&str],
+    envs: &[(String, String)],
+) -> io::Result<std::process::Output> {
+    for attempt in 1..=MILVUS_PROXY_RETRY_ATTEMPTS {
+        let output = run_cli_in_dir_with_env(dir, args, envs)?;
+        if output.status.success() {
+            return Ok(output);
+        }
+        if !is_milvus_proxy_not_ready(&output) || attempt == MILVUS_PROXY_RETRY_ATTEMPTS {
+            return Ok(output);
+        }
+        std::thread::sleep(MILVUS_PROXY_RETRY_DELAY);
+    }
+    run_cli_in_dir_with_env(dir, args, envs)
+}
+
 fn fixture_repo_root() -> io::Result<PathBuf> {
     if let Ok(value) = std::env::var(ENV_FIXTURE_REPO) {
         return Ok(resolve_repo_path(&value));
     }
-    if let Some(value) = read_env_local_value(ENV_FIXTURE_REPO)? {
+    if let Some(value) = read_env_value(ENV_FIXTURE_REPO)? {
         return Ok(resolve_repo_path(&value));
     }
-    Ok(PathBuf::from(DEFAULT_FIXTURE_REPO))
+    Ok(resolve_repo_path(DEFAULT_FIXTURE_REPO))
 }
 
 fn resolve_repo_path(value: &str) -> PathBuf {
@@ -125,11 +166,14 @@ fn resolve_repo_path(value: &str) -> PathBuf {
 fn copy_fixture_repo() -> io::Result<PathBuf> {
     let source = fixture_repo_root()?;
     if !source.is_dir() {
-        return Err(io::Error::other(format!(
-            "fixture repo missing at {}; set {} or update .env.local",
-            source.display(),
-            ENV_FIXTURE_REPO
-        )));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "fixture repo missing at {}; set {} or update .env",
+                source.display(),
+                ENV_FIXTURE_REPO
+            ),
+        ));
     }
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -140,10 +184,24 @@ fn copy_fixture_repo() -> io::Result<PathBuf> {
     Ok(dest)
 }
 
+fn copy_fixture_repo_or_skip() -> io::Result<Option<PathBuf>> {
+    match copy_fixture_repo() {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            eprintln!("skipping integration test: {error}");
+            Ok(None)
+        },
+        Err(error) => Err(error),
+    }
+}
+
 fn copy_dir_recursive(source: &Path, dest: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
+        if entry.file_name() == std::ffi::OsStr::new(".context") {
+            continue;
+        }
         let file_type = entry.file_type()?;
         let source_path = entry.path();
         let dest_path = dest.join(entry.file_name());
@@ -165,12 +223,12 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| manifest_dir.to_path_buf())
 }
 
-fn env_local_path() -> PathBuf {
-    workspace_root().join(".env.local")
+fn env_path() -> PathBuf {
+    workspace_root().join(".env")
 }
 
-fn read_env_local_value(key: &str) -> io::Result<Option<String>> {
-    let path = env_local_path();
+fn read_env_value(key: &str) -> io::Result<Option<String>> {
+    let path = env_path();
     let contents = match std::fs::read_to_string(&path) {
         Ok(value) => value,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -251,10 +309,12 @@ fn require_milvus_ready(address: &str) -> io::Result<()> {
             "invalid Milvus address: {address}"
         )));
     };
-    let retries = 30;
+
+    // Phase 1: Wait for TCP on gRPC port (19530).
+    let retries = MILVUS_READY_RETRIES;
     for attempt in 1..=retries {
         match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
-            Ok(_) => return Ok(()),
+            Ok(_) => break,
             Err(error) => {
                 if attempt == retries {
                     return Err(io::Error::other(format!(
@@ -265,7 +325,47 @@ fn require_milvus_ready(address: &str) -> io::Result<()> {
             },
         }
     }
+
+    // Phase 2: Wait for Proxy gRPC readiness via HTTP health endpoint (port 9091).
+    // TCP on 19530 opens before the gRPC Proxy is initialized; /healthz returns
+    // 200 only once the Proxy can actually serve requests.
+    let health_addr: std::net::SocketAddr = "127.0.0.1:9091"
+        .parse()
+        .map_err(|err| io::Error::other(format!("bad health address: {err}")))?;
+    for attempt in 1..=retries {
+        if check_milvus_health(&health_addr).is_ok() {
+            return Ok(());
+        }
+        if attempt == retries {
+            return Err(io::Error::other(
+                "Milvus gRPC Proxy not ready (healthz on :9091 did not return 200). \
+                 Start it with `just milvus-up` or `docker compose up -d`."
+                    .to_string(),
+            ));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
     Ok(())
+}
+
+/// Sends a minimal HTTP/1.1 GET /healthz to the given address and returns Ok(())
+/// if the response status line contains "200".
+fn check_milvus_health(addr: &std::net::SocketAddr) -> io::Result<()> {
+    use std::io::{Read, Write};
+    let mut stream = TcpStream::connect_timeout(addr, Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:9091\r\nConnection: close\r\n\r\n")?;
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf)?;
+    let response = String::from_utf8_lossy(&buf[..n]);
+    if response.contains("200") {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "healthz returned non-200: {response}"
+        )))
+    }
 }
 
 fn config_fixture_path(relative: &str) -> PathBuf {
@@ -278,7 +378,9 @@ fn config_fixture_path(relative: &str) -> PathBuf {
 
 #[test]
 fn cli_index_search_with_onnx_and_local_vdb() -> io::Result<()> {
-    let temp = copy_fixture_repo()?;
+    let Some(temp) = copy_fixture_repo_or_skip()? else {
+        return Ok(());
+    };
     let model_dir = onnx_model_dir()?;
 
     let envs = vec![
@@ -305,11 +407,13 @@ fn cli_index_search_with_onnx_and_local_vdb() -> io::Result<()> {
 
 #[test]
 fn cli_index_search_with_milvus_and_auto_embedding() -> io::Result<()> {
-    if !milvus_enabled() {
-        eprintln!("skipping milvus external test; milvus feature not enabled");
+    if !milvus_enabled() || !milvus_reachable(DEFAULT_MILVUS_ADDRESS) {
+        eprintln!("skipping: milvus feature not enabled or not reachable");
         return Ok(());
     }
-    let temp = copy_fixture_repo()?;
+    let Some(temp) = copy_fixture_repo_or_skip()? else {
+        return Ok(());
+    };
     require_milvus_ready(DEFAULT_MILVUS_ADDRESS)?;
 
     let model_dir = onnx_model_dir()?;
@@ -328,11 +432,14 @@ fn cli_index_search_with_milvus_and_auto_embedding() -> io::Result<()> {
     let config = config_fixture_path("config/backend-config.milvus-external.toml");
     let config_arg = config.to_string_lossy().to_string();
 
-    let output =
-        run_cli_in_dir_with_env(&temp, &["index", "--init", "--config", &config_arg], &envs)?;
+    let output = run_cli_with_milvus_proxy_retry(
+        &temp,
+        &["index", "--init", "--config", &config_arg],
+        &envs,
+    )?;
     assert_command_success(&output, "index");
 
-    let output = run_cli_in_dir_with_env(
+    let output = run_cli_with_milvus_proxy_retry(
         &temp,
         &["search", "--query", "local-index", "--config", &config_arg],
         &envs,
@@ -344,11 +451,13 @@ fn cli_index_search_with_milvus_and_auto_embedding() -> io::Result<()> {
 
 #[test]
 fn cli_index_search_with_openai_and_milvus() -> io::Result<()> {
-    if !milvus_enabled() {
-        eprintln!("skipping milvus external test; milvus feature not enabled");
+    if !milvus_enabled() || !milvus_reachable(DEFAULT_MILVUS_ADDRESS) {
+        eprintln!("skipping: milvus feature not enabled or not reachable");
         return Ok(());
     }
-    let temp = copy_fixture_repo()?;
+    let Some(temp) = copy_fixture_repo_or_skip()? else {
+        return Ok(());
+    };
     require_milvus_ready(DEFAULT_MILVUS_ADDRESS)?;
 
     let api_key = match std::env::var("OPENAI_API_KEY") {
@@ -367,11 +476,14 @@ fn cli_index_search_with_openai_and_milvus() -> io::Result<()> {
         ("OPENAI_API_KEY".to_string(), api_key),
     ];
 
-    let output =
-        run_cli_in_dir_with_env(&temp, &["index", "--init", "--config", &config_arg], &envs)?;
+    let output = run_cli_with_milvus_proxy_retry(
+        &temp,
+        &["index", "--init", "--config", &config_arg],
+        &envs,
+    )?;
     assert_command_success(&output, "index");
 
-    let output = run_cli_in_dir_with_env(
+    let output = run_cli_with_milvus_proxy_retry(
         &temp,
         &["search", "--query", "local-index", "--config", &config_arg],
         &envs,

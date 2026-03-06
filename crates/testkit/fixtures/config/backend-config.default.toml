@@ -35,6 +35,8 @@ timeoutMs = 60000
 indexTimeoutMs = 60000
 batchSize = 128
 snapshotStorage = "project"
+snapshotFormat = "v1"
+experimentalU8Search = false
 
 [sync]
 allowedExtensions = [

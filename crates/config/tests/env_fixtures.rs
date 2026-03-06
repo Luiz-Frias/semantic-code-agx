@@ -1,6 +1,9 @@
 //! Integration tests for env parsing and env-to-config merging.
 
-use semantic_code_config::{BackendConfig, BackendEnv, EnvParseError, apply_env_overrides};
+use semantic_code_config::{
+    BackendConfig, VectorKernelKind, VectorSearchStrategy, VectorSnapshotFormat,
+    load_backend_config_from_sources,
+};
 use semantic_code_shared::ErrorCode;
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -33,9 +36,7 @@ fn read_env_map(relative: &str) -> Result<BTreeMap<String, String>, Box<dyn Erro
 #[test]
 fn env_fixtures_merge_into_effective_config() -> Result<(), Box<dyn Error>> {
     let env_map = read_env_map("env/backend-env.valid.json")?;
-    let env = BackendEnv::from_map(&env_map)?;
-
-    let config = apply_env_overrides(BackendConfig::default(), &env)?;
+    let config = load_backend_config_from_sources(None, None, &env_map)?;
 
     assert_eq!(config.core.timeout_ms, 45_000);
     assert_eq!(config.core.max_concurrency, 16);
@@ -55,6 +56,17 @@ fn env_fixtures_merge_into_effective_config() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         config.vector_db.base_url.as_deref(),
         Some("http://localhost:19530/")
+    );
+    assert_eq!(config.vector_db.snapshot_format, VectorSnapshotFormat::V2);
+    assert_eq!(config.vector_db.snapshot_max_bytes, Some(8_388_608));
+    assert_eq!(
+        config.vector_db.effective_vector_kernel(),
+        VectorKernelKind::HnswRs
+    );
+    assert!(config.vector_db.experimental_u8_search);
+    assert_eq!(
+        config.vector_db.effective_search_strategy(),
+        VectorSearchStrategy::U8ThenF32Rerank
     );
 
     let extensions: Vec<&str> = config
@@ -80,14 +92,34 @@ fn env_fixtures_merge_into_effective_config() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn env_map_honors_kernel_and_force_reindex_overrides() -> Result<(), Box<dyn Error>> {
+    let mut env_map = BTreeMap::new();
+    env_map.insert(
+        "SCA_VECTOR_DB_VECTOR_KERNEL".to_string(),
+        "hnsw-rs".to_string(),
+    );
+    env_map.insert(
+        "SCA_VECTOR_DB_FORCE_REINDEX_ON_KERNEL_CHANGE".to_string(),
+        "true".to_string(),
+    );
+
+    let mut base = BackendConfig::default();
+    base.vector_db.vector_kernel = Some(VectorKernelKind::Dfrr);
+    let base_json = serde_json::to_string(&base)?;
+    let config = load_backend_config_from_sources(Some(&base_json), None, &env_map)?;
+    assert_eq!(
+        config.vector_db.vector_kernel,
+        Some(VectorKernelKind::HnswRs)
+    );
+    assert!(config.vector_db.force_reindex_on_kernel_change);
+    Ok(())
+}
+
+#[test]
 fn invalid_env_fixture_is_rejected() -> Result<(), Box<dyn Error>> {
     let env_map = read_env_map("env/backend-env.invalid.json")?;
-    let error = BackendEnv::from_map(&env_map).err();
-    assert!(matches!(error, Some(EnvParseError::InvalidUrl { .. })));
-
-    let envelope: semantic_code_shared::ErrorEnvelope = error
-        .ok_or_else(|| std::io::Error::other("expected invalid env error"))?
-        .into();
+    let envelope = load_backend_config_from_sources(None, None, &env_map)
+        .expect_err("expected invalid env parse error");
     assert_eq!(envelope.code, ErrorCode::new("config", "invalid_env_url"));
 
     Ok(())

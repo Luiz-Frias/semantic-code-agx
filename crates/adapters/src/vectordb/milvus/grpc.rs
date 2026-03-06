@@ -36,7 +36,7 @@ use semantic_code_ports::{
     CollectionName as PortsCollectionName, HybridSearchBatchRequest, HybridSearchData,
     HybridSearchOptions, HybridSearchRequest as PortsHybridSearchRequest, HybridSearchResult,
     VectorDbPort, VectorDbProviderInfo, VectorDbRow, VectorDocument, VectorDocumentForInsert,
-    VectorSearchRequest, VectorSearchResult,
+    VectorSearchRequest, VectorSearchResponse, VectorSearchResult,
 };
 use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext, Result};
 use std::collections::BTreeMap;
@@ -47,6 +47,7 @@ use tonic::codegen::InterceptedService;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::service::Interceptor;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tracing::Instrument;
 
 /// Milvus gRPC adapter configuration.
 #[derive(Debug, Clone)]
@@ -447,15 +448,26 @@ impl VectorDbPort for MilvusGrpcVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            let description = description
-                .as_deref()
-                .unwrap_or(DEFAULT_COLLECTION_DESCRIPTION);
-            let spec = build_dense_schema_spec(dimension);
-            create_collection(&ctx, &adapter, &collection_name, &spec, description).await?;
-            Ok(())
-        })
+        let has_description = description.is_some();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.create_collection",
+            collection = %collection,
+            dimension,
+            has_description
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                let description = description
+                    .as_deref()
+                    .unwrap_or(DEFAULT_COLLECTION_DESCRIPTION);
+                let spec = build_dense_schema_spec(dimension);
+                create_collection(&ctx, &adapter, &collection_name, &spec, description).await?;
+                Ok(())
+            }
+            .instrument(span),
+        )
     }
 
     fn create_hybrid_collection(
@@ -467,15 +479,26 @@ impl VectorDbPort for MilvusGrpcVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            let description = description
-                .as_deref()
-                .unwrap_or(DEFAULT_HYBRID_COLLECTION_DESCRIPTION);
-            let spec = build_hybrid_schema_spec(dimension);
-            create_collection(&ctx, &adapter, &collection_name, &spec, description).await?;
-            Ok(())
-        })
+        let has_description = description.is_some();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.create_hybrid_collection",
+            collection = %collection,
+            dimension,
+            has_description
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                let description = description
+                    .as_deref()
+                    .unwrap_or(DEFAULT_HYBRID_COLLECTION_DESCRIPTION);
+                let spec = build_hybrid_schema_spec(dimension);
+                create_collection(&ctx, &adapter, &collection_name, &spec, description).await?;
+                Ok(())
+            }
+            .instrument(span),
+        )
     }
 
     fn drop_collection(
@@ -485,27 +508,35 @@ impl VectorDbPort for MilvusGrpcVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            let request = DropCollectionRequest {
-                base: Some(MsgBase::new(MsgType::DropCollection)),
-                db_name: adapter.db_name.clone().unwrap_or_default().into(),
-                collection_name: collection_name.as_str().to_owned(),
-            };
-            let response = adapter
-                .call_with_timeout(
-                    &ctx,
-                    "milvus_grpc.drop_collection",
-                    Some(&collection_name),
-                    adapter.client.clone().drop_collection(request),
-                )
-                .await?;
-            ensure_status_ok(
-                &response,
-                &Self::context("milvus_grpc.drop_collection", Some(&collection_name)),
-            )?;
-            Ok(())
-        })
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.drop_collection",
+            collection = %collection
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                let request = DropCollectionRequest {
+                    base: Some(MsgBase::new(MsgType::DropCollection)),
+                    db_name: adapter.db_name.clone().unwrap_or_default().into(),
+                    collection_name: collection_name.as_str().to_owned(),
+                };
+                let response = adapter
+                    .call_with_timeout(
+                        &ctx,
+                        "milvus_grpc.drop_collection",
+                        Some(&collection_name),
+                        adapter.client.clone().drop_collection(request),
+                    )
+                    .await?;
+                ensure_status_ok(
+                    &response,
+                    &Self::context("milvus_grpc.drop_collection", Some(&collection_name)),
+                )?;
+                Ok(())
+            }
+            .instrument(span),
+        )
     }
 
     fn has_collection(
@@ -515,24 +546,32 @@ impl VectorDbPort for MilvusGrpcVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<bool>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            let request = HasCollectionRequest {
-                base: Some(MsgBase::new(MsgType::HasCollection)),
-                db_name: adapter.db_name.clone().unwrap_or_default().into(),
-                collection_name: collection_name.as_str().to_owned(),
-                time_stamp: 0,
-            };
-            let response = adapter
-                .call_with_timeout(
-                    &ctx,
-                    "milvus_grpc.has_collection",
-                    Some(&collection_name),
-                    adapter.client.clone().has_collection(request),
-                )
-                .await?;
-            Ok(response.value)
-        })
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.has_collection",
+            collection = %collection
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                let request = HasCollectionRequest {
+                    base: Some(MsgBase::new(MsgType::HasCollection)),
+                    db_name: adapter.db_name.clone().unwrap_or_default().into(),
+                    collection_name: collection_name.as_str().to_owned(),
+                    time_stamp: 0,
+                };
+                let response = adapter
+                    .call_with_timeout(
+                        &ctx,
+                        "milvus_grpc.has_collection",
+                        Some(&collection_name),
+                        adapter.client.clone().has_collection(request),
+                    )
+                    .await?;
+                Ok(response.value)
+            }
+            .instrument(span),
+        )
     }
 
     fn list_collections(
@@ -541,34 +580,38 @@ impl VectorDbPort for MilvusGrpcVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<PortsCollectionName>>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            let request = ShowCollectionsRequest {
-                base: Some(MsgBase::new(MsgType::ShowCollections)),
-                db_name: adapter.db_name.clone().unwrap_or_default().into(),
-                time_stamp: 0,
-                r#type: ShowType::All as i32,
-                collection_names: Vec::new(),
-            };
-            let response = adapter
-                .call_with_timeout(
-                    &ctx,
-                    "milvus_grpc.list_collections",
-                    None,
-                    adapter.client.clone().show_collections(request),
-                )
-                .await?;
-            if let Some(status) = response.status.as_ref() {
-                ensure_status_ok(status, &Self::context("milvus_grpc.list_collections", None))?;
-            }
-            let names = response.collection_names;
-            let mut out = Vec::with_capacity(names.len());
-            for name in names {
-                if let Ok(parsed) = CollectionName::parse(name.as_str()) {
-                    out.push(parsed);
+        let span = tracing::info_span!("adapter.vectordb.milvus.grpc.list_collections");
+        Box::pin(
+            async move {
+                let request = ShowCollectionsRequest {
+                    base: Some(MsgBase::new(MsgType::ShowCollections)),
+                    db_name: adapter.db_name.clone().unwrap_or_default().into(),
+                    time_stamp: 0,
+                    r#type: ShowType::All as i32,
+                    collection_names: Vec::new(),
+                };
+                let response = adapter
+                    .call_with_timeout(
+                        &ctx,
+                        "milvus_grpc.list_collections",
+                        None,
+                        adapter.client.clone().show_collections(request),
+                    )
+                    .await?;
+                if let Some(status) = response.status.as_ref() {
+                    ensure_status_ok(status, &Self::context("milvus_grpc.list_collections", None))?;
                 }
+                let names = response.collection_names;
+                let mut out = Vec::with_capacity(names.len());
+                for name in names {
+                    if let Ok(parsed) = CollectionName::parse(name.as_str()) {
+                        out.push(parsed);
+                    }
+                }
+                Ok(out)
             }
-            Ok(out)
-        })
+            .instrument(span),
+        )
     }
 
     fn insert(
@@ -579,38 +622,48 @@ impl VectorDbPort for MilvusGrpcVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            let fields_data = Self::build_documents(documents)?;
-            let row_count = fields_data.first().map_or(0, f_len);
-            let num_rows = u32::try_from(row_count).unwrap_or_default();
-            let request = InsertRequest {
-                base: Some(MsgBase::new(MsgType::Insert)),
-                db_name: adapter.db_name.clone().unwrap_or_default().into(),
-                collection_name: collection_name.as_str().to_owned(),
-                partition_name: String::new(),
-                num_rows,
-                fields_data,
-                hash_keys: Vec::new(),
-                schema_timestamp: 0,
-            };
-            let response = adapter
-                .call_with_timeout(
-                    &ctx,
-                    "milvus_grpc.insert",
-                    Some(&collection_name),
-                    adapter.client.clone().insert(request),
-                )
-                .await?;
-            if let Some(status) = response.status.as_ref() {
-                ensure_status_ok(
-                    status,
-                    &Self::context("milvus_grpc.insert", Some(&collection_name)),
-                )?;
+        let doc_count = documents.len();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.insert",
+            collection = %collection,
+            doc_count
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                let fields_data = Self::build_documents(documents)?;
+                let row_count = fields_data.first().map_or(0, f_len);
+                let num_rows = u32::try_from(row_count).unwrap_or_default();
+                let request = InsertRequest {
+                    base: Some(MsgBase::new(MsgType::Insert)),
+                    db_name: adapter.db_name.clone().unwrap_or_default().into(),
+                    collection_name: collection_name.as_str().to_owned(),
+                    partition_name: String::new(),
+                    num_rows,
+                    fields_data,
+                    hash_keys: Vec::new(),
+                    schema_timestamp: 0,
+                };
+                let response = adapter
+                    .call_with_timeout(
+                        &ctx,
+                        "milvus_grpc.insert",
+                        Some(&collection_name),
+                        adapter.client.clone().insert(request),
+                    )
+                    .await?;
+                if let Some(status) = response.status.as_ref() {
+                    ensure_status_ok(
+                        status,
+                        &Self::context("milvus_grpc.insert", Some(&collection_name)),
+                    )?;
+                }
+                Ok(())
             }
-            Ok(())
-        })
+            .instrument(span),
+        )
     }
 
     fn insert_hybrid(
@@ -619,14 +672,22 @@ impl VectorDbPort for MilvusGrpcVectorDb {
         collection_name: PortsCollectionName,
         documents: Vec<VectorDocumentForInsert>,
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
-        self.insert(ctx, collection_name, documents)
+        let doc_count = documents.len();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.insert_hybrid",
+            collection = %collection,
+            doc_count
+        );
+        let future = self.insert(ctx, collection_name, documents);
+        Box::pin(future.instrument(span))
     }
 
     fn search(
         &self,
         ctx: &RequestContext,
         request: VectorSearchRequest,
-    ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<VectorSearchResult>>> {
+    ) -> semantic_code_ports::BoxFuture<'_, Result<VectorSearchResponse>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
         let VectorSearchRequest {
@@ -634,76 +695,92 @@ impl VectorDbPort for MilvusGrpcVectorDb {
             query_vector,
             options,
         } = request;
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            let placeholder_group = encode_placeholder_group_float(query_vector.as_ref())?;
-            let mut search_params = vec![
-                KeyValuePair {
-                    key: "topk".to_owned(),
-                    value: options.top_k.unwrap_or(10).to_string(),
-                },
-                KeyValuePair {
-                    key: "metric_type".to_owned(),
-                    value: adapter.index_config.dense.metric_type.as_ref().to_owned(),
-                },
-                KeyValuePair {
-                    key: "anns_field".to_owned(),
-                    value: DEFAULT_VECTOR_FIELD.to_owned(),
-                },
-            ];
-            let params_value = merge_search_params(&search_params)?;
-            search_params.push(KeyValuePair {
-                key: "params".to_owned(),
-                value: params_value,
-            });
+        let top_k = options.top_k.unwrap_or(10);
+        let has_filter = options.filter_expr.is_some();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.search",
+            collection = %collection,
+            top_k,
+            has_filter
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                let placeholder_group = encode_placeholder_group_float(query_vector.as_ref())?;
+                let mut search_params = vec![
+                    KeyValuePair {
+                        key: "topk".to_owned(),
+                        value: options.top_k.unwrap_or(10).to_string(),
+                    },
+                    KeyValuePair {
+                        key: "metric_type".to_owned(),
+                        value: adapter.index_config.dense.metric_type.as_ref().to_owned(),
+                    },
+                    KeyValuePair {
+                        key: "anns_field".to_owned(),
+                        value: DEFAULT_VECTOR_FIELD.to_owned(),
+                    },
+                ];
+                let params_value = merge_search_params(&search_params)?;
+                search_params.push(KeyValuePair {
+                    key: "params".to_owned(),
+                    value: params_value,
+                });
 
-            let request = SearchRequest {
-                base: Some(MsgBase::new(MsgType::Search)),
-                db_name: adapter.db_name.clone().unwrap_or_default().into(),
-                collection_name: collection_name.as_str().to_owned(),
-                partition_names: Vec::new(),
-                dsl: options.filter_expr.clone().unwrap_or_default().into(),
-                placeholder_group,
-                dsl_type: crate::vectordb::milvus::proto::common::DslType::BoolExprV1 as i32,
-                output_fields: milvus_output_fields(),
-                search_params,
-                travel_timestamp: 0,
-                guarantee_timestamp: 0,
-                nq: 1,
-                not_return_all_meta: false,
-                consistency_level: crate::vectordb::milvus::proto::common::ConsistencyLevel::Bounded
-                    as i32,
-                use_default_consistency: false,
-                search_by_primary_keys: false,
-                expr_template_values: std::collections::HashMap::new(),
-                sub_reqs: Vec::new(),
-                function_score: None,
-            };
+                let request = SearchRequest {
+                    base: Some(MsgBase::new(MsgType::Search)),
+                    db_name: adapter.db_name.clone().unwrap_or_default().into(),
+                    collection_name: collection_name.as_str().to_owned(),
+                    partition_names: Vec::new(),
+                    dsl: options.filter_expr.clone().unwrap_or_default().into(),
+                    placeholder_group,
+                    dsl_type: crate::vectordb::milvus::proto::common::DslType::BoolExprV1 as i32,
+                    output_fields: milvus_output_fields(),
+                    search_params,
+                    travel_timestamp: 0,
+                    guarantee_timestamp: 0,
+                    nq: 1,
+                    not_return_all_meta: false,
+                    consistency_level:
+                        crate::vectordb::milvus::proto::common::ConsistencyLevel::Bounded as i32,
+                    use_default_consistency: false,
+                    search_by_primary_keys: false,
+                    expr_template_values: std::collections::HashMap::new(),
+                    sub_reqs: Vec::new(),
+                    function_score: None,
+                };
 
-            let response = adapter
-                .call_with_timeout(
-                    &ctx,
-                    "milvus_grpc.search",
-                    Some(&collection_name),
-                    adapter.client.clone().search(request),
-                )
-                .await?;
-            if let Some(status) = response.status.as_ref() {
-                ensure_status_ok(
-                    status,
-                    &Self::context("milvus_grpc.search", Some(&collection_name)),
-                )?;
+                let response = adapter
+                    .call_with_timeout(
+                        &ctx,
+                        "milvus_grpc.search",
+                        Some(&collection_name),
+                        adapter.client.clone().search(request),
+                    )
+                    .await?;
+                if let Some(status) = response.status.as_ref() {
+                    ensure_status_ok(
+                        status,
+                        &Self::context("milvus_grpc.search", Some(&collection_name)),
+                    )?;
+                }
+                let data = response.results.ok_or_else(|| {
+                    ErrorEnvelope::unexpected(
+                        ErrorCode::new("vector", "vdb_invalid_response"),
+                        "missing search results",
+                        ErrorClass::NonRetriable,
+                    )
+                })?;
+                let results = Self::parse_results(data)?;
+                Ok(VectorSearchResponse {
+                    results,
+                    stats: None,
+                })
             }
-            let data = response.results.ok_or_else(|| {
-                ErrorEnvelope::unexpected(
-                    ErrorCode::new("vector", "vdb_invalid_response"),
-                    "missing search results",
-                    ErrorClass::NonRetriable,
-                )
-            })?;
-            Self::parse_results(data)
-        })
+            .instrument(span),
+        )
     }
 
     fn hybrid_search(
@@ -718,58 +795,72 @@ impl VectorDbPort for MilvusGrpcVectorDb {
             search_requests,
             options,
         } = request;
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            let requests = build_hybrid_search_requests(
-                &adapter,
-                &collection_name,
-                &search_requests,
-                &options,
-            )?;
-
-            let rank_params = build_rank_params(&options);
-            let request = HybridSearchRequest {
-                base: None,
-                db_name: adapter.db_name.clone().unwrap_or_default().into(),
-                collection_name: collection_name.as_str().to_owned(),
-                partition_names: Vec::new(),
-                requests,
-                rank_params,
-                travel_timestamp: 0,
-                guarantee_timestamp: 0,
-                not_return_all_meta: false,
-                output_fields: milvus_output_fields(),
-                consistency_level: crate::vectordb::milvus::proto::common::ConsistencyLevel::Bounded
-                    as i32,
-                use_default_consistency: false,
-                function_score: None,
-            };
-
-            let response = adapter
-                .call_with_timeout(
-                    &ctx,
-                    "milvus_grpc.hybrid_search",
-                    Some(&collection_name),
-                    adapter.client.clone().hybrid_search(request),
-                )
-                .await?;
-            if let Some(status) = response.status.as_ref() {
-                ensure_status_ok(
-                    status,
-                    &Self::context("milvus_grpc.hybrid_search", Some(&collection_name)),
+        let request_count = search_requests.len();
+        let has_filter = options.filter_expr.is_some();
+        let limit = options.limit.unwrap_or(10);
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.hybrid_search",
+            collection = %collection,
+            request_count,
+            limit,
+            has_filter
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                let requests = build_hybrid_search_requests(
+                    &adapter,
+                    &collection_name,
+                    &search_requests,
+                    &options,
                 )?;
-            }
 
-            let data = response.results.ok_or_else(|| {
-                ErrorEnvelope::unexpected(
-                    ErrorCode::new("vector", "vdb_invalid_response"),
-                    "missing hybrid search results",
-                    ErrorClass::NonRetriable,
-                )
-            })?;
-            Self::parse_hybrid_results(data)
-        })
+                let rank_params = build_rank_params(&options);
+                let request = HybridSearchRequest {
+                    base: None,
+                    db_name: adapter.db_name.clone().unwrap_or_default().into(),
+                    collection_name: collection_name.as_str().to_owned(),
+                    partition_names: Vec::new(),
+                    requests,
+                    rank_params,
+                    travel_timestamp: 0,
+                    guarantee_timestamp: 0,
+                    not_return_all_meta: false,
+                    output_fields: milvus_output_fields(),
+                    consistency_level:
+                        crate::vectordb::milvus::proto::common::ConsistencyLevel::Bounded as i32,
+                    use_default_consistency: false,
+                    function_score: None,
+                };
+
+                let response = adapter
+                    .call_with_timeout(
+                        &ctx,
+                        "milvus_grpc.hybrid_search",
+                        Some(&collection_name),
+                        adapter.client.clone().hybrid_search(request),
+                    )
+                    .await?;
+                if let Some(status) = response.status.as_ref() {
+                    ensure_status_ok(
+                        status,
+                        &Self::context("milvus_grpc.hybrid_search", Some(&collection_name)),
+                    )?;
+                }
+
+                let data = response.results.ok_or_else(|| {
+                    ErrorEnvelope::unexpected(
+                        ErrorCode::new("vector", "vdb_invalid_response"),
+                        "missing hybrid search results",
+                        ErrorClass::NonRetriable,
+                    )
+                })?;
+                Self::parse_hybrid_results(data)
+            }
+            .instrument(span),
+        )
     }
 
     fn delete(
@@ -780,37 +871,47 @@ impl VectorDbPort for MilvusGrpcVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<()>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            let expr = milvus_in_string("id", &ids);
-            let request = DeleteRequest {
-                base: Some(MsgBase::new(MsgType::Delete)),
-                db_name: adapter.db_name.clone().unwrap_or_default().into(),
-                collection_name: collection_name.as_str().to_owned(),
-                partition_name: String::new(),
-                expr: expr.as_ref().to_owned(),
-                hash_keys: Vec::new(),
-                consistency_level: crate::vectordb::milvus::proto::common::ConsistencyLevel::Bounded
-                    as i32,
-                expr_template_values: std::collections::HashMap::new(),
-            };
-            let response = adapter
-                .call_with_timeout(
-                    &ctx,
-                    "milvus_grpc.delete",
-                    Some(&collection_name),
-                    adapter.client.clone().delete(request),
-                )
-                .await?;
-            if let Some(status) = response.status.as_ref() {
-                ensure_status_ok(
-                    status,
-                    &Self::context("milvus_grpc.delete", Some(&collection_name)),
-                )?;
+        let id_count = ids.len();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.delete",
+            collection = %collection,
+            id_count
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                let expr = milvus_in_string("id", &ids);
+                let request = DeleteRequest {
+                    base: Some(MsgBase::new(MsgType::Delete)),
+                    db_name: adapter.db_name.clone().unwrap_or_default().into(),
+                    collection_name: collection_name.as_str().to_owned(),
+                    partition_name: String::new(),
+                    expr: expr.as_ref().to_owned(),
+                    hash_keys: Vec::new(),
+                    consistency_level:
+                        crate::vectordb::milvus::proto::common::ConsistencyLevel::Bounded as i32,
+                    expr_template_values: std::collections::HashMap::new(),
+                };
+                let response = adapter
+                    .call_with_timeout(
+                        &ctx,
+                        "milvus_grpc.delete",
+                        Some(&collection_name),
+                        adapter.client.clone().delete(request),
+                    )
+                    .await?;
+                if let Some(status) = response.status.as_ref() {
+                    ensure_status_ok(
+                        status,
+                        &Self::context("milvus_grpc.delete", Some(&collection_name)),
+                    )?;
+                }
+                Ok(())
             }
-            Ok(())
-        })
+            .instrument(span),
+        )
     }
 
     fn query(
@@ -823,59 +924,73 @@ impl VectorDbPort for MilvusGrpcVectorDb {
     ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<VectorDbRow>>> {
         let ctx = ctx.clone();
         let adapter = self.clone();
-        Box::pin(async move {
-            ensure_collection_name(&collection_name)?;
-            adapter.ensure_loaded(&ctx, &collection_name).await?;
-            let mut params = Vec::new();
-            if let Some(limit) = limit {
-                params.push(KeyValuePair {
-                    key: "limit".to_owned(),
-                    value: limit.to_string(),
-                });
+        let has_filter = !filter.is_empty();
+        let output_field_count = output_fields.len();
+        let has_limit = limit.is_some();
+        let collection = collection_name.as_str().to_owned();
+        let span = tracing::info_span!(
+            "adapter.vectordb.milvus.grpc.query",
+            collection = %collection,
+            has_filter,
+            output_field_count,
+            has_limit
+        );
+        Box::pin(
+            async move {
+                ensure_collection_name(&collection_name)?;
+                adapter.ensure_loaded(&ctx, &collection_name).await?;
+                let mut params = Vec::new();
+                if let Some(limit) = limit {
+                    params.push(KeyValuePair {
+                        key: "limit".to_owned(),
+                        value: limit.to_string(),
+                    });
+                }
+                let request = QueryRequest {
+                    base: None,
+                    db_name: adapter.db_name.clone().unwrap_or_default().into(),
+                    collection_name: collection_name.as_str().to_owned(),
+                    expr: filter.as_ref().to_owned(),
+                    output_fields: output_fields
+                        .iter()
+                        .map(|f| f.as_ref().to_owned())
+                        .collect(),
+                    partition_names: Vec::new(),
+                    travel_timestamp: 0,
+                    guarantee_timestamp: 0,
+                    query_params: params,
+                    not_return_all_meta: false,
+                    consistency_level:
+                        crate::vectordb::milvus::proto::common::ConsistencyLevel::Bounded as i32,
+                    use_default_consistency: false,
+                    expr_template_values: std::collections::HashMap::new(),
+                };
+                let response = adapter
+                    .call_with_timeout(
+                        &ctx,
+                        "milvus_grpc.query",
+                        Some(&collection_name),
+                        adapter.client.clone().query(request),
+                    )
+                    .await?;
+                if let Some(status) = response.status.as_ref() {
+                    ensure_status_ok(
+                        status,
+                        &Self::context("milvus_grpc.query", Some(&collection_name)),
+                    )?;
+                }
+                let fields = response.fields_data;
+                let columns = collect_fields(fields)?;
+                let row_count = columns.values().next().map_or(0, FieldColumn::len);
+                let mut rows = Vec::with_capacity(row_count);
+                for idx in 0..row_count {
+                    let doc = build_row_from_columns(&columns, idx);
+                    rows.push(doc);
+                }
+                Ok(rows)
             }
-            let request = QueryRequest {
-                base: None,
-                db_name: adapter.db_name.clone().unwrap_or_default().into(),
-                collection_name: collection_name.as_str().to_owned(),
-                expr: filter.as_ref().to_owned(),
-                output_fields: output_fields
-                    .iter()
-                    .map(|f| f.as_ref().to_owned())
-                    .collect(),
-                partition_names: Vec::new(),
-                travel_timestamp: 0,
-                guarantee_timestamp: 0,
-                query_params: params,
-                not_return_all_meta: false,
-                consistency_level: crate::vectordb::milvus::proto::common::ConsistencyLevel::Bounded
-                    as i32,
-                use_default_consistency: false,
-                expr_template_values: std::collections::HashMap::new(),
-            };
-            let response = adapter
-                .call_with_timeout(
-                    &ctx,
-                    "milvus_grpc.query",
-                    Some(&collection_name),
-                    adapter.client.clone().query(request),
-                )
-                .await?;
-            if let Some(status) = response.status.as_ref() {
-                ensure_status_ok(
-                    status,
-                    &Self::context("milvus_grpc.query", Some(&collection_name)),
-                )?;
-            }
-            let fields = response.fields_data;
-            let columns = collect_fields(fields)?;
-            let row_count = columns.values().next().map_or(0, FieldColumn::len);
-            let mut rows = Vec::with_capacity(row_count);
-            for idx in 0..row_count {
-                let doc = build_row_from_columns(&columns, idx);
-                rows.push(doc);
-            }
-            Ok(rows)
-        })
+            .instrument(span),
+        )
     }
 }
 

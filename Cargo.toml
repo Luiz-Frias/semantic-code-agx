@@ -1,5 +1,5 @@
 # =============================================================================
-# WORKSPACE CARGO.TOML - semantic-code-agx
+# WORKSPACE CARGO.TOML - semantic-code-agents-rs
 # =============================================================================
 # Rust modular monolith with hexagonal architecture.
 # CLI-first semantic code search engine.
@@ -48,12 +48,12 @@ members = [
 # WORKSPACE PACKAGE METADATA
 # =============================================================================
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.95.0"
+rust-version = "1.96.0"
 authors = ["Luiz Frias <luizf35@gmail.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Luiz-Frias/semantic-code-agx"
+repository = "https://github.com/Luiz-Frias/semantic-code-agents-rs"
 keywords = ["semantic-search", "code-search", "embeddings", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -105,6 +105,8 @@ tokenizers = "0.22.2"
 # ─────────────────────────────────────────────────────────────────────────────
 md5 = "0.7"
 sha2 = "0.10"
+crc32fast = "1"
+rustc-hash = "2"
 uuid = { version = "1", features = ["v4"] }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,11 +115,22 @@ uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# OBSERVABILITY
+# ─────────────────────────────────────────────────────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+  "json",
+  "env-filter",
+  "fmt",
+] }
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ASYNC RUNTIME (Phase 04+)
 # ─────────────────────────────────────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = "0.3"
+fs2 = "0.4"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
@@ -139,6 +152,10 @@ tree-sitter-typescript = "0.23.2"
 # VECTOR SEARCH (Phase 05+)
 # ─────────────────────────────────────────────────────────────────────────────
 hnsw_rs = "0.3.3"
+libc = "0.2"
+memmap2 = "0.9"
+ordered-float = { version = "4", features = ["serde"] }
+rayon = "1"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TESTING
@@ -155,21 +172,31 @@ sqlx = { version = "0.8", default-features = false, features = [
 tiberius = { version = "0.12", default-features = false, features = ["rustls"] }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DFRR KERNEL (private repo, BSL-1.1)
+# ─────────────────────────────────────────────────────────────────────────────
+semantic-code-dfrr-hnsw = { git = "ssh://git@github.com/Luiz-Frias/dfrr-kernel-rs.git", tag = "v0.2.0" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANE INFERENCE (private repo, BSL-1.1 — Apple Neural Engine embedding inference)
+# ─────────────────────────────────────────────────────────────────────────────
+ane-inference = { git = "ssh://git@github.com/Luiz-Frias/ane-inference-rs.git", tag = "v0.1.0" }
+
+# ─────────────────────────────────────────────────────────────────────────────
 # WORKSPACE CRATES (internal dependencies)
 # ─────────────────────────────────────────────────────────────────────────────
-semantic-code-core = { path = "crates/core", version = "0.1.1" }
-semantic-code-shared = { path = "crates/shared", version = "0.1.1" }
-semantic-code-validate-derive = { path = "crates/validate-derive", version = "0.1.1" }
-semantic-code-domain = { path = "crates/domain", version = "0.1.1" }
-semantic-code-ports = { path = "crates/ports", version = "0.1.1" }
-semantic-code-config = { path = "crates/config", version = "0.1.1" }
-semantic-code-api = { path = "crates/api", version = "0.1.1" }
-semantic-code-vector = { path = "crates/vector", version = "0.1.1" }
-semantic-code-adapters = { path = "crates/adapters", version = "0.1.1" }
-semantic-code-app = { path = "crates/app", version = "0.1.1" }
-semantic-code-infra = { path = "crates/infra", version = "0.1.1" }
-semantic-code-facade = { path = "crates/facade", version = "0.1.1" }
-semantic-code-testkit = { path = "crates/testkit", version = "0.1.1" }
+semantic-code-core = { path = "crates/core", version = "0.2.0" }
+semantic-code-shared = { path = "crates/shared", version = "0.2.0" }
+semantic-code-validate-derive = { path = "crates/validate-derive", version = "0.2.0" }
+semantic-code-domain = { path = "crates/domain", version = "0.2.0" }
+semantic-code-ports = { path = "crates/ports", version = "0.2.0" }
+semantic-code-config = { path = "crates/config", version = "0.2.0" }
+semantic-code-api = { path = "crates/api", version = "0.2.0" }
+semantic-code-vector = { path = "crates/vector", version = "0.2.0" }
+semantic-code-adapters = { path = "crates/adapters", version = "0.2.0" }
+semantic-code-app = { path = "crates/app", version = "0.2.0" }
+semantic-code-infra = { path = "crates/infra", version = "0.2.0" }
+semantic-code-facade = { path = "crates/facade", version = "0.2.0" }
+semantic-code-testkit = { path = "crates/testkit", version = "0.2.0" }
 
 # =============================================================================
 # WORKSPACE LINTS
@@ -260,7 +287,27 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# =============================================================================
+# PATCH: Resolve private-repo transitive deps to local workspace crates.
+# The dfrr-kernel-rs crate declares `semantic-code-shared = "0.2"` and
+# `semantic-code-vector = "0.2"` as crates.io deps. Since these aren't
+# published yet, we patch them to resolve from the workspace instead.
+# =============================================================================
+[patch.crates-io]
+semantic-code-shared = { path = "crates/shared" }
+semantic-code-vector = { path = "crates/vector" }
+
 [profile.release-with-debug]
 inherits = "release"
 debug = true
 strip = false
+
+[profile.release-pgo-generate]
+inherits = "release"
+strip = false        # LLVM needs symbols to map .profraw → functions
+lto = "thin"         # Sufficient for instrumentation phase
+
+[profile.release-pgo-use]
+inherits = "release"
+lto = "fat"          # Full cross-crate inlining with profile data
+strip = true

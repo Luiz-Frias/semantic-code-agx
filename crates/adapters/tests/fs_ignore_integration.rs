@@ -1,7 +1,6 @@
 //! Filesystem + ignore integration tests.
 
-use semantic_code_adapters::fs::{LocalFileSystem, LocalPathPolicy};
-use semantic_code_adapters::ignore::IgnoreMatcher;
+use semantic_code_adapters::{IgnoreMatcher, LocalFileSystem, LocalPathPolicy};
 use semantic_code_ports::{
     FileSystemEntryKind, FileSystemPort, IgnoreMatchInput, IgnorePort, PathPolicyPort,
     SafeRelativePath,

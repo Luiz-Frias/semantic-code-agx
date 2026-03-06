@@ -1,6 +1,6 @@
 //! Integration tests for the local file sync adapter.
 
-use semantic_code_adapters::file_sync::LocalFileSync;
+use semantic_code_adapters::LocalFileSync;
 use semantic_code_config::SnapshotStorageMode;
 use semantic_code_ports::{FileSyncInitOptions, FileSyncOptions, FileSyncPort};
 use semantic_code_shared::{ErrorEnvelope, RequestContext, Result};

@@ -2,7 +2,7 @@
 
 use crate::log_sink::LogSink;
 use semantic_code_ports::{TelemetryPort, TelemetryTags, TelemetryTimer};
-use semantic_code_shared::redaction::{REDACTED, is_secret_key};
+use semantic_code_shared::{REDACTED, is_secret_key};
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

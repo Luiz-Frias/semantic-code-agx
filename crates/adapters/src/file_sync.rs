@@ -5,8 +5,9 @@ use semantic_code_config::SnapshotStorageMode;
 use semantic_code_ports::{
     FileChangeSet, FileSyncInitOptions, FileSyncOptions, FileSyncPort, IgnoreMatchInput, IgnorePort,
 };
-use semantic_code_shared::merkle::{MerkleDag, MerkleDagSerialized};
-use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext, Result};
+use semantic_code_shared::{
+    ErrorClass, ErrorCode, ErrorEnvelope, MerkleDag, MerkleDagSerialized, RequestContext, Result,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};

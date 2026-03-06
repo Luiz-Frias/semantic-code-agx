@@ -8,8 +8,8 @@ mod splitter;
 mod types;
 
 #[cfg(test)]
-pub(crate) use change_detector::{delete_file_chunks_by_relative_path, normalize_change_set};
-pub(crate) use change_detector::{
+pub use change_detector::{delete_file_chunks_by_relative_path, normalize_change_set};
+pub use change_detector::{
     delete_modified_files, delete_removed_files, detect_changes, emit_progress, total_changes,
 };
 pub use types::{
@@ -18,7 +18,7 @@ pub use types::{
     SplitStageStats,
 };
 
-use crate::generated::{INDEX_PIPELINE_TRANSITIONS, IndexPipelineState};
+use crate::generated::IndexPipelineState;
 use embedder::{drain_one_embedding_batch, flush_pending_batches, schedule_embedding_batch};
 use inserter::drain_one_insert_batch;
 use scanner::file_extension_of;
@@ -29,8 +29,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
 use types::{
-    FileResult, IndexPipeline, IndexPipelineFsm, IndexRunContext, IndexStageStatsCollector,
-    IndexState, IndexWorkerPools, IndexingLimits, PendingChunk, ProgressTracker,
+    FileResult, IndexPipeline, IndexRunContext, IndexStageStatsCollector, IndexState,
+    IndexWorkerPools, IndexingLimits, PendingChunk, ProgressTracker,
 };
 
 struct Prepared;
@@ -39,73 +39,170 @@ struct Embedded;
 struct Inserted;
 struct Completed;
 
+trait PipelineStateLabel {
+    fn label() -> &'static str;
+}
+
+impl PipelineStateLabel for Prepared {
+    fn label() -> &'static str {
+        IndexPipelineState::Prepared.as_str()
+    }
+}
+
+impl PipelineStateLabel for Scanned {
+    fn label() -> &'static str {
+        IndexPipelineState::Scanned.as_str()
+    }
+}
+
+impl PipelineStateLabel for Embedded {
+    fn label() -> &'static str {
+        IndexPipelineState::Embedded.as_str()
+    }
+}
+
+impl PipelineStateLabel for Inserted {
+    fn label() -> &'static str {
+        IndexPipelineState::Inserted.as_str()
+    }
+}
+
+impl PipelineStateLabel for Completed {
+    fn label() -> &'static str {
+        IndexPipelineState::Completed.as_str()
+    }
+}
+
+impl<S> IndexPipeline<S>
+where
+    S: PipelineStateLabel,
+{
+    fn label() -> &'static str {
+        S::label()
+    }
+}
+
 impl IndexPipeline<Prepared> {
     const fn new() -> Self {
         Self {
-            fsm: IndexPipelineFsm::new(),
             _state: PhantomData,
         }
     }
 
-    fn scanned(self) -> Result<IndexPipeline<Scanned>> {
-        self.transition(IndexPipelineState::Scanned)
+    fn scanned(self) -> IndexPipeline<Scanned> {
+        let Self { _state: _ } = self;
+        tracing::debug!(
+            from = Self::label(),
+            to = IndexPipelineState::Scanned.as_str(),
+            "index pipeline transition"
+        );
+        IndexPipeline {
+            _state: PhantomData,
+        }
     }
 }
 
 impl IndexPipeline<Scanned> {
-    fn embedded(self) -> Result<IndexPipeline<Embedded>> {
-        self.transition(IndexPipelineState::Embedded)
+    #[tracing::instrument(
+        name = "app.index.pipeline",
+        skip_all,
+        fields(
+            total_files = ctx.files.len(),
+            embedding_batch_size = ctx.limits.embedding_batch_size.get(),
+            chunk_limit = ctx.limits.chunk_limit.get(),
+        )
+    )]
+    async fn run(
+        self,
+        ctx: &IndexRunContext<'_>,
+        progress: &mut ProgressTracker,
+    ) -> Result<(IndexPipeline<Inserted>, IndexCodebaseOutput)> {
+        let mut state = IndexState::new();
+        let pipeline = self.schedule(ctx, progress, &mut state).await?;
+        let pipeline = pipeline.commit(ctx, &mut state).await?;
+
+        Ok((
+            pipeline,
+            IndexCodebaseOutput {
+                indexed_files: state.indexed_files,
+                total_chunks: state.total_chunks,
+                status: state.status,
+                stage_stats: ctx.stats.snapshot(),
+            },
+        ))
+    }
+
+    async fn schedule<'a>(
+        self,
+        ctx: &IndexRunContext<'a>,
+        progress: &mut ProgressTracker,
+        state: &mut IndexState<'a>,
+    ) -> Result<IndexPipeline<Embedded>> {
+        process_files(ctx, state, progress).await?;
+        Ok(self.embedded())
+    }
+
+    fn embedded(self) -> IndexPipeline<Embedded> {
+        let Self { _state: _ } = self;
+        tracing::debug!(
+            from = Self::label(),
+            to = IndexPipelineState::Embedded.as_str(),
+            "index pipeline transition"
+        );
+        IndexPipeline {
+            _state: PhantomData,
+        }
     }
 }
 
 impl IndexPipeline<Embedded> {
-    fn inserted(self) -> Result<IndexPipeline<Inserted>> {
-        self.transition(IndexPipelineState::Inserted)
+    async fn commit<'a>(
+        self,
+        ctx: &IndexRunContext<'a>,
+        state: &mut IndexState<'a>,
+    ) -> Result<IndexPipeline<Inserted>> {
+        finalize_batches(ctx, state).await?;
+        Ok(self.inserted())
+    }
+
+    fn inserted(self) -> IndexPipeline<Inserted> {
+        let Self { _state: _ } = self;
+        tracing::debug!(
+            from = Self::label(),
+            to = IndexPipelineState::Inserted.as_str(),
+            "index pipeline transition"
+        );
+        IndexPipeline {
+            _state: PhantomData,
+        }
     }
 }
 
 impl IndexPipeline<Inserted> {
-    fn completed(self) -> Result<IndexPipeline<Completed>> {
-        self.transition(IndexPipelineState::Completed)
-    }
-}
-
-impl<S> IndexPipeline<S> {
-    fn transition<T>(self, next: IndexPipelineState) -> Result<IndexPipeline<T>> {
-        let mut fsm = self.fsm;
-        fsm.transition(next)?;
-        Ok(IndexPipeline {
-            fsm,
+    fn completed(self) -> IndexPipeline<Completed> {
+        let Self { _state: _ } = self;
+        tracing::debug!(
+            from = Self::label(),
+            to = IndexPipelineState::Completed.as_str(),
+            "index pipeline transition"
+        );
+        IndexPipeline {
             _state: PhantomData,
-        })
-    }
-}
-
-impl IndexPipelineFsm {
-    fn transition(&mut self, next: IndexPipelineState) -> Result<()> {
-        if is_allowed_transition(self.state, next) {
-            self.state = next;
-            return Ok(());
         }
-        Err(ErrorEnvelope::unexpected(
-            ErrorCode::internal(),
-            format!(
-                "invalid index pipeline transition: {} -> {}",
-                self.state.as_str(),
-                next.as_str()
-            ),
-            ErrorClass::NonRetriable,
-        ))
     }
-}
-
-fn is_allowed_transition(from: IndexPipelineState, to: IndexPipelineState) -> bool {
-    INDEX_PIPELINE_TRANSITIONS
-        .iter()
-        .any(|(source, target)| *source == from && *target == to)
 }
 
 /// Index a codebase using the provided dependencies and input.
+#[tracing::instrument(
+    name = "app.index_codebase",
+    skip_all,
+    fields(
+        collection = %input.collection_name.as_str(),
+        index_mode = %input.index_mode.as_str(),
+        force_reindex = input.force_reindex,
+        has_file_list = input.file_list.is_some(),
+    )
+)]
 pub async fn index_codebase(
     ctx: &RequestContext,
     deps: &IndexCodebaseDeps,
@@ -119,19 +216,21 @@ pub async fn index_codebase(
 
     progress.emit("Preparing collection...", 0, 100, Some(0));
     ensure_collection(ctx, deps, &input).await?;
+    tracing::debug!("index collection prepared");
 
     progress.emit("Scanning files...", 0, 100, Some(5));
     let scan_started = Instant::now();
     let files = scanner::load_index_files(ctx, deps, &input).await?;
+    tracing::debug!(file_count = files.len(), "index scan completed");
     stats.record_scan(
         u64::try_from(files.len()).unwrap_or(u64::MAX),
         scan_started.elapsed(),
     );
-    let pipeline = pipeline.scanned()?;
+    let pipeline = pipeline.scanned();
 
     if files.is_empty() {
         progress.emit("No files to index", 100, 100, Some(100));
-        let _pipeline = pipeline.embedded()?.inserted()?.completed()?;
+        let _pipeline = pipeline.embedded().inserted().completed();
         return Ok(IndexCodebaseOutput {
             indexed_files: 0,
             total_chunks: 0,
@@ -143,39 +242,36 @@ pub async fn index_codebase(
     let limits = IndexingLimits::from_input(&input);
     let pools = IndexWorkerPools::new(ctx, &limits)?;
     let run_ctx = IndexRunContext::new(ctx, deps, &input, &files, &limits, &pools, stats);
+    tracing::debug!(
+        file_count = files.len(),
+        embedding_batch_size = limits.embedding_batch_size.get(),
+        chunk_limit = limits.chunk_limit.get(),
+        "starting index pipeline workers"
+    );
 
-    let output = run_indexing(&run_ctx, &mut progress, pipeline).await;
+    let output = pipeline.run(&run_ctx, &mut progress).await;
 
     pools.stop().await;
 
     let (pipeline, output) = output?;
-    let _pipeline = pipeline.completed()?;
+    let _pipeline = pipeline.completed();
+    tracing::debug!(
+        indexed_files = output.indexed_files,
+        total_chunks = output.total_chunks,
+        status = ?output.status,
+        "index pipeline completed"
+    );
     Ok(output)
 }
 
-async fn run_indexing(
-    ctx: &IndexRunContext<'_>,
-    progress: &mut ProgressTracker,
-    pipeline: IndexPipeline<Scanned>,
-) -> Result<(IndexPipeline<Inserted>, IndexCodebaseOutput)> {
-    let mut state = IndexState::new();
-
-    process_files(ctx, &mut state, progress).await?;
-    let pipeline = pipeline.embedded()?;
-    finalize_batches(ctx, &mut state).await?;
-    let pipeline = pipeline.inserted()?;
-
-    Ok((
-        pipeline,
-        IndexCodebaseOutput {
-            indexed_files: state.indexed_files,
-            total_chunks: state.total_chunks,
-            status: state.status,
-            stage_stats: ctx.stats.snapshot(),
-        },
-    ))
-}
-
+#[tracing::instrument(
+    name = "app.index.process_files",
+    skip_all,
+    fields(
+        total_files = ctx.files.len(),
+        prefetch_limit = ctx.limits.prefetch_limit,
+    )
+)]
 async fn process_files<'a>(
     ctx: &IndexRunContext<'a>,
     state: &mut IndexState<'a>,
@@ -222,6 +318,10 @@ async fn process_files<'a>(
 
             if state.total_chunks >= ctx.limits.chunk_limit.get() {
                 state.status = IndexCodebaseStatus::LimitReached;
+                tracing::debug!(
+                    chunk_limit = ctx.limits.chunk_limit.get(),
+                    "chunk limit reached during file processing"
+                );
                 break;
             }
 
@@ -261,7 +361,21 @@ async fn process_files<'a>(
     Ok(())
 }
 
+#[tracing::instrument(
+    name = "app.index.finalize_batches",
+    skip_all,
+    fields(
+        max_pending_embedding_batches = ctx.limits.max_pending_embedding_batches,
+        max_pending_insert_batches = ctx.limits.max_pending_insert_batches,
+    )
+)]
 async fn finalize_batches<'a>(ctx: &IndexRunContext<'a>, state: &mut IndexState<'a>) -> Result<()> {
+    tracing::debug!(
+        pending_chunks = state.batch.pending.len(),
+        queued_embedding_tasks = state.batch.embedding_tasks.len(),
+        queued_insert_tasks = state.batch.insert_tasks.len(),
+        "finalizing index pipeline batches"
+    );
     flush_pending_batches(&ctx.batch, &mut state.batch).await?;
 
     if !state.batch.pending.is_empty() {
@@ -280,6 +394,15 @@ async fn finalize_batches<'a>(ctx: &IndexRunContext<'a>, state: &mut IndexState<
     Ok(())
 }
 
+#[tracing::instrument(
+    name = "app.index.ensure_collection",
+    skip_all,
+    fields(
+        collection = %input.collection_name.as_str(),
+        index_mode = %input.index_mode.as_str(),
+        force_reindex = input.force_reindex,
+    )
+)]
 async fn ensure_collection(
     ctx: &RequestContext,
     deps: &IndexCodebaseDeps,
@@ -323,14 +446,47 @@ async fn ensure_collection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn index_pipeline_state_labels_follow_transitions() {
+        assert_eq!(
+            IndexPipeline::<Prepared>::label(),
+            IndexPipelineState::Prepared.as_str()
+        );
+
+        let scanned = IndexPipeline::<Prepared>::new().scanned();
+        assert_eq!(
+            IndexPipeline::<Scanned>::label(),
+            IndexPipelineState::Scanned.as_str()
+        );
+
+        let embedded = scanned.embedded();
+        assert_eq!(
+            IndexPipeline::<Embedded>::label(),
+            IndexPipelineState::Embedded.as_str()
+        );
+
+        let inserted = embedded.inserted();
+        assert_eq!(
+            IndexPipeline::<Inserted>::label(),
+            IndexPipelineState::Inserted.as_str()
+        );
+
+        let _completed = inserted.completed();
+        assert_eq!(
+            IndexPipeline::<Completed>::label(),
+            IndexPipelineState::Completed.as_str()
+        );
+    }
+
+    use crate::{SemanticSearchDeps, SemanticSearchInput, semantic_search};
     use semantic_code_domain::{EmbeddingProviderId, VectorDbProviderId};
     use semantic_code_ports::{
         BoxFuture, CodeChunk, CollectionName, DetectDimensionRequest, EmbedBatchRequest,
         EmbedRequest, EmbeddingPort, EmbeddingProviderInfo, EmbeddingVector, FileSystemDirEntry,
         FileSystemEntryKind, FileSystemPort, FileSystemStat, HybridSearchBatchRequest,
         HybridSearchResult, IgnoreMatchInput, IgnorePort, Language, LineSpan, PathPolicyPort,
-        SplitOptions, SplitterPort, VectorDbPort, VectorDbProviderInfo, VectorDocumentForInsert,
-        VectorSearchRequest, VectorSearchResult,
+        SplitOptions, SplitterPort, VectorDbPort, VectorDbProviderInfo, VectorDocument,
+        VectorDocumentForInsert, VectorSearchRequest, VectorSearchResponse, VectorSearchResult,
     };
     use std::collections::HashMap;
     use std::num::NonZeroUsize;
@@ -554,6 +710,7 @@ mod tests {
     struct TestEmbedding {
         provider: EmbeddingProviderInfo,
         vector: Arc<[f32]>,
+        batch_error: Option<ErrorEnvelope>,
     }
 
     impl TestEmbedding {
@@ -564,6 +721,14 @@ mod tests {
                     name: "test".into(),
                 },
                 vector: Arc::from(vec![0.0, 0.1, 0.2]),
+                batch_error: None,
+            }
+        }
+
+        fn with_batch_error(error: ErrorEnvelope) -> Self {
+            Self {
+                batch_error: Some(error),
+                ..Self::new()
             }
         }
     }
@@ -597,7 +762,11 @@ mod tests {
             request: EmbedBatchRequest,
         ) -> BoxFuture<'_, Result<Vec<EmbeddingVector>>> {
             let vector = Arc::clone(&self.vector);
+            let batch_error = self.batch_error.clone();
             Box::pin(async move {
+                if let Some(error) = batch_error {
+                    return Err(error);
+                }
                 let texts = request.texts;
                 Ok(texts
                     .into_iter()
@@ -676,6 +845,7 @@ mod tests {
         provider: VectorDbProviderInfo,
         inserted: Arc<Mutex<Vec<VectorDocumentForInsert>>>,
         exists: Arc<Mutex<bool>>,
+        insert_error: Option<ErrorEnvelope>,
     }
 
     impl SpyVectorDb {
@@ -687,6 +857,14 @@ mod tests {
                 },
                 inserted: Arc::new(Mutex::new(Vec::new())),
                 exists: Arc::new(Mutex::new(false)),
+                insert_error: None,
+            }
+        }
+
+        fn with_insert_error(error: ErrorEnvelope) -> Self {
+            Self {
+                insert_error: Some(error),
+                ..Self::new()
             }
         }
 
@@ -770,7 +948,11 @@ mod tests {
             documents: Vec<VectorDocumentForInsert>,
         ) -> BoxFuture<'_, Result<()>> {
             let inserted = self.inserted.clone();
+            let insert_error = self.insert_error.clone();
             Box::pin(async move {
+                if let Some(error) = insert_error {
+                    return Err(error);
+                }
                 let mut guard = inserted.lock().expect("inserted lock");
                 guard.extend(documents);
                 Ok(())
@@ -784,7 +966,11 @@ mod tests {
             documents: Vec<VectorDocumentForInsert>,
         ) -> BoxFuture<'_, Result<()>> {
             let inserted = self.inserted.clone();
+            let insert_error = self.insert_error.clone();
             Box::pin(async move {
+                if let Some(error) = insert_error {
+                    return Err(error);
+                }
                 let mut guard = inserted.lock().expect("inserted lock");
                 guard.extend(documents);
                 Ok(())
@@ -794,9 +980,31 @@ mod tests {
         fn search(
             &self,
             _ctx: &RequestContext,
-            _request: VectorSearchRequest,
-        ) -> BoxFuture<'_, Result<Vec<VectorSearchResult>>> {
-            Box::pin(async move { Ok(Vec::new()) })
+            request: VectorSearchRequest,
+        ) -> BoxFuture<'_, Result<VectorSearchResponse>> {
+            let inserted = self.inserted.clone();
+            Box::pin(async move {
+                let top_k = request.options.top_k.unwrap_or(u32::MAX);
+                let top_k = usize::try_from(top_k).unwrap_or(usize::MAX);
+                let guard = inserted.lock().expect("inserted lock");
+                let results = guard
+                    .iter()
+                    .take(top_k)
+                    .map(|document| VectorSearchResult {
+                        document: VectorDocument {
+                            id: document.id.clone(),
+                            vector: None,
+                            content: document.content.clone(),
+                            metadata: document.metadata.clone(),
+                        },
+                        score: 1.0,
+                    })
+                    .collect();
+                Ok(VectorSearchResponse {
+                    results,
+                    stats: None,
+                })
+            })
         }
 
         fn hybrid_search(
@@ -870,6 +1078,37 @@ mod tests {
         }
     }
 
+    async fn index_then_search(
+        ctx: &RequestContext,
+        deps: &IndexCodebaseDeps,
+        index_input: IndexCodebaseInput,
+        query: &str,
+    ) -> Result<crate::SemanticSearchOutput> {
+        let collection_name = index_input.collection_name.clone();
+        let index_mode = index_input.index_mode;
+        let codebase_root = index_input.codebase_root.to_string_lossy().to_string();
+        index_codebase(ctx, deps, index_input).await?;
+        semantic_search(
+            ctx,
+            &SemanticSearchDeps {
+                embedding: Arc::clone(&deps.embedding),
+                vectordb: Arc::clone(&deps.vectordb),
+                logger: None,
+                telemetry: None,
+            },
+            SemanticSearchInput {
+                codebase_root: codebase_root.into_boxed_str(),
+                collection_name,
+                index_mode,
+                query: query.to_owned().into_boxed_str(),
+                top_k: Some(5),
+                threshold: Some(0.0),
+                query_vector: None,
+            },
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn extension_filtering_is_deterministic() -> Result<()> {
         let fs = TestFileSystem::default();
@@ -897,6 +1136,10 @@ mod tests {
         assert_eq!(paths, vec!["src/a.rs", "src/c.rs"]);
         assert_eq!(output.indexed_files, 2);
         assert_eq!(output.total_chunks, 2);
+        assert_eq!(output.stage_stats.embed.chunks, 2);
+        assert_eq!(output.stage_stats.insert.chunks, 2);
+        assert_eq!(output.stage_stats.embed.batches, 1);
+        assert_eq!(output.stage_stats.insert.batches, 1);
         Ok(())
     }
 
@@ -922,6 +1165,157 @@ mod tests {
 
         assert_eq!(output.status, IndexCodebaseStatus::LimitReached);
         assert_eq!(output.total_chunks, 1);
+        assert_eq!(output.stage_stats.embed.chunks, 1);
+        assert_eq!(output.stage_stats.insert.chunks, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stage_stats_match_successful_embed_insert_outcomes() -> Result<()> {
+        let fs = TestFileSystem::default();
+        fs.add_file("src/a.rs", "fn a() {}\n");
+
+        let vectordb = Arc::new(SpyVectorDb::new());
+        let deps = test_deps(
+            fs,
+            Arc::new(TestEmbedding::new()),
+            vectordb,
+            Arc::new(TestSplitter::new(5)),
+        );
+
+        let mut input =
+            default_input(CollectionName::parse("code_chunks_test").map_err(ErrorEnvelope::from)?);
+        input.embedding_batch_size = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
+
+        let ctx = RequestContext::new_request();
+        let output = index_codebase(&ctx, &deps, input).await?;
+
+        assert_eq!(output.status, IndexCodebaseStatus::Completed);
+        assert_eq!(output.total_chunks, 5);
+        assert_eq!(output.stage_stats.embed.chunks, 5);
+        assert_eq!(output.stage_stats.insert.chunks, 5);
+        assert_eq!(output.stage_stats.embed.batches, 3);
+        assert_eq!(output.stage_stats.insert.batches, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_then_search_succeeds_on_healthy_pipeline() -> Result<()> {
+        let fs = TestFileSystem::default();
+        fs.add_file("src/a.rs", "fn needle() {}\n");
+
+        let vectordb = Arc::new(SpyVectorDb::new());
+        let deps = test_deps(
+            fs,
+            Arc::new(TestEmbedding::new()),
+            vectordb,
+            Arc::new(TestSplitter::new(1)),
+        );
+
+        let input =
+            default_input(CollectionName::parse("code_chunks_test").map_err(ErrorEnvelope::from)?);
+
+        let ctx = RequestContext::new_request();
+        let output = index_then_search(&ctx, &deps, input, "needle").await?;
+
+        assert!(
+            output
+                .results
+                .iter()
+                .any(|result| result.key.relative_path.as_ref() == "src/a.rs")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_then_search_fails_loudly_on_embed_failure() -> Result<()> {
+        let fs = TestFileSystem::default();
+        fs.add_file("src/a.rs", "fn a() {}\n");
+
+        let vectordb = Arc::new(SpyVectorDb::new());
+        let deps = test_deps(
+            fs,
+            Arc::new(TestEmbedding::with_batch_error(ErrorEnvelope::unexpected(
+                ErrorCode::timeout(),
+                "embed backend unavailable",
+                ErrorClass::Retriable,
+            ))),
+            vectordb.clone(),
+            Arc::new(TestSplitter::new(1)),
+        );
+
+        let input =
+            default_input(CollectionName::parse("code_chunks_test").map_err(ErrorEnvelope::from)?);
+
+        let ctx = RequestContext::new_request();
+        let error = match index_then_search(&ctx, &deps, input, "needle").await {
+            Ok(_) => {
+                return Err(ErrorEnvelope::unexpected(
+                    ErrorCode::internal(),
+                    "expected index_then_search to fail on embed error",
+                    ErrorClass::NonRetriable,
+                ));
+            },
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, ErrorCode::timeout());
+        assert_eq!(
+            error.metadata.get("stage").map(|value| value.as_str()),
+            Some("embed")
+        );
+        assert_eq!(
+            error.metadata.get("operation").map(|value| value.as_str()),
+            Some("index_codebase.embed_batch")
+        );
+        assert!(error.metadata.contains_key("batchIndex"));
+        assert!(vectordb.inserted_paths().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_then_search_fails_loudly_on_insert_failure() -> Result<()> {
+        let fs = TestFileSystem::default();
+        fs.add_file("src/a.rs", "fn a() {}\n");
+
+        let vectordb = Arc::new(SpyVectorDb::with_insert_error(ErrorEnvelope::unexpected(
+            ErrorCode::timeout(),
+            "insert backend unavailable",
+            ErrorClass::Retriable,
+        )));
+        let deps = test_deps(
+            fs,
+            Arc::new(TestEmbedding::new()),
+            vectordb.clone(),
+            Arc::new(TestSplitter::new(1)),
+        );
+
+        let input =
+            default_input(CollectionName::parse("code_chunks_test").map_err(ErrorEnvelope::from)?);
+
+        let ctx = RequestContext::new_request();
+        let error = match index_then_search(&ctx, &deps, input, "needle").await {
+            Ok(_) => {
+                return Err(ErrorEnvelope::unexpected(
+                    ErrorCode::internal(),
+                    "expected index_then_search to fail on insert error",
+                    ErrorClass::NonRetriable,
+                ));
+            },
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, ErrorCode::timeout());
+        assert_eq!(
+            error.metadata.get("stage").map(|value| value.as_str()),
+            Some("insert")
+        );
+        assert_eq!(
+            error.metadata.get("operation").map(|value| value.as_str()),
+            Some("index_codebase.insert_batch")
+        );
+        assert!(error.metadata.contains_key("insertTaskIndex"));
+        assert!(vectordb.inserted_paths().is_empty());
         Ok(())
     }
 

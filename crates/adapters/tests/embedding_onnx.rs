@@ -2,8 +2,8 @@
 #![cfg(feature = "onnx")]
 #![allow(missing_docs)]
 
-use semantic_code_adapters::embedding::onnx::{OnnxEmbedding, OnnxEmbeddingConfig};
-use semantic_code_ports::embedding::{EmbedBatchRequest, EmbeddingPort};
+use semantic_code_adapters::{OnnxEmbedding, OnnxEmbeddingConfig};
+use semantic_code_ports::{EmbedBatchRequest, EmbeddingPort};
 use semantic_code_shared::{RequestContext, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

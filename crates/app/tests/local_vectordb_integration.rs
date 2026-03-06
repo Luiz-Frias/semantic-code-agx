@@ -1,18 +1,16 @@
 //! Integration test for local vector DB adapter.
 
-use semantic_code_adapters::fs::LocalFileSystem;
-use semantic_code_adapters::ignore::IgnoreMatcher;
-use semantic_code_adapters::splitter::TreeSitterSplitter;
-use semantic_code_adapters::vectordb_local::LocalVectorDb;
+use semantic_code_adapters::{IgnoreMatcher, LocalFileSystem, LocalVectorDb, TreeSitterSplitter};
 use semantic_code_app::{
     IndexCodebaseDeps, IndexCodebaseInput, IndexCodebaseStatus, SemanticSearchDeps,
     SemanticSearchInput, index_codebase, semantic_search,
 };
-use semantic_code_config::SnapshotStorageMode;
+use semantic_code_config::{SnapshotStorageMode, VectorSearchStrategy, VectorSnapshotFormat};
 use semantic_code_domain::{CollectionName, EmbeddingProviderId, IndexMode};
 use semantic_code_ports::{EmbeddingPort, EmbeddingProviderInfo, VectorDbPort};
 use semantic_code_shared::{ErrorEnvelope, RequestContext, Result};
 use semantic_code_testkit::in_memory::{InMemoryEmbeddingFixed, NoopLogger, NoopTelemetry};
+use semantic_code_vector::HnswKernel;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +41,11 @@ async fn index_and_search_with_local_vectordb() -> Result<()> {
     let vectordb: Arc<dyn VectorDbPort> = Arc::new(LocalVectorDb::new(
         codebase_root.clone(),
         SnapshotStorageMode::Disabled,
+        VectorSnapshotFormat::V1,
+        None,
+        Arc::new(HnswKernel::new()),
+        false,
+        VectorSearchStrategy::F32Hnsw,
     )?);
 
     let deps = IndexCodebaseDeps {
@@ -50,7 +53,7 @@ async fn index_and_search_with_local_vectordb() -> Result<()> {
         vectordb: Arc::clone(&vectordb),
         splitter: Arc::new(TreeSitterSplitter::default()),
         filesystem: Arc::new(LocalFileSystem::new(None)),
-        path_policy: Arc::new(semantic_code_adapters::fs::LocalPathPolicy::new()),
+        path_policy: Arc::new(semantic_code_adapters::LocalPathPolicy::new()),
         ignore: Arc::new(IgnoreMatcher::new()),
         logger: Some(Arc::new(NoopLogger::default())),
         telemetry: Some(Arc::new(NoopTelemetry::default())),
@@ -97,10 +100,11 @@ async fn index_and_search_with_local_vectordb() -> Result<()> {
             query: "local-index".into(),
             top_k: Some(3),
             threshold: Some(0.1),
+            query_vector: None,
         },
     )
     .await?;
 
-    assert!(!results.is_empty());
+    assert!(!results.results.is_empty());
     Ok(())
 }

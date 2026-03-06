@@ -8,7 +8,7 @@ use semantic_code_ports::{
     HybridSearchRequest, HybridSearchResult, IgnoreMatchInput, IgnorePort, PathPolicyPort,
     SafeRelativePath, SplitOptions, SplitterPort, VectorDbPort, VectorDbProviderInfo, VectorDbRow,
     VectorDocument, VectorDocumentForInsert, VectorDocumentMetadata, VectorSearchOptions,
-    VectorSearchRequest, VectorSearchResult,
+    VectorSearchRequest, VectorSearchResponse, VectorSearchResult,
 };
 use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext, Result};
 use std::collections::HashMap;
@@ -447,7 +447,7 @@ impl VectorDbPort for SelfCheckVectorDb {
         &self,
         _ctx: &RequestContext,
         request: VectorSearchRequest,
-    ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<VectorSearchResult>>> {
+    ) -> semantic_code_ports::BoxFuture<'_, Result<VectorSearchResponse>> {
         let this = self.clone();
         let VectorSearchRequest {
             collection_name,
@@ -455,8 +455,13 @@ impl VectorDbPort for SelfCheckVectorDb {
             options,
         } = request;
         Box::pin(async move {
-            this.search_internal(&collection_name, query_vector.as_ref(), &options)
-                .await
+            let results = this
+                .search_internal(&collection_name, query_vector.as_ref(), &options)
+                .await?;
+            Ok(VectorSearchResponse {
+                results,
+                stats: None,
+            })
         })
     }
 

@@ -10,6 +10,7 @@ use semantic_code_ports::{
 use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tracing::Instrument;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MODEL: &str = "gemini-embedding-001";
@@ -282,10 +283,19 @@ impl EmbeddingPort for GeminiEmbedding {
     ) -> semantic_code_ports::BoxFuture<'_, Result<Vec<EmbeddingVector>>> {
         let ctx = ctx.clone();
         let texts = request.texts;
-        Box::pin(async move {
-            self.embed_many(&ctx, texts, "gemini_embedding.embed_batch")
-                .await
-        })
+        let batch_size = texts.len();
+        let span = tracing::info_span!(
+            "adapter.embedding.gemini.embed_batch",
+            provider = "gemini",
+            batch_size
+        );
+        Box::pin(
+            async move {
+                self.embed_many(&ctx, texts, "gemini_embedding.embed_batch")
+                    .await
+            }
+            .instrument(span),
+        )
     }
 }
 

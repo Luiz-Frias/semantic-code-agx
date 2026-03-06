@@ -20,23 +20,36 @@ pub const fn ports_crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-pub mod embedding;
-pub mod filesystem;
-pub mod ignore;
-pub mod logger;
-pub mod splitter;
-pub mod sync;
-pub mod telemetry;
-pub mod vectordb;
+mod calibration;
+mod embedding;
+mod filesystem;
+mod ignore;
+mod logger;
+mod splitter;
+mod sync;
+mod telemetry;
+mod vectordb;
 
-pub use embedding::*;
-pub use filesystem::*;
-pub use ignore::*;
-pub use logger::*;
-pub use splitter::*;
-pub use sync::*;
-pub use telemetry::*;
-pub use vectordb::*;
+pub use calibration::CalibrationPort;
+pub use embedding::{
+    DetectDimensionOptions, DetectDimensionRequest, EmbedBatchRequest, EmbedRequest, EmbeddingPort,
+    EmbeddingPortLend, EmbeddingProviderInfo, EmbeddingVector, EmbeddingVectorFixed,
+};
+pub use filesystem::{
+    FileSystemDirEntry, FileSystemEntryKind, FileSystemPort, FileSystemPortExt, FileSystemSession,
+    FileSystemStat, PathPolicyPort, SafeRelativePath,
+};
+pub use ignore::{IgnoreMatchInput, IgnorePort};
+pub use logger::{LogEvent, LogFields, LogLevel, LoggerPort};
+pub use splitter::{CodeChunk, SplitOptions, SplitterPort};
+pub use sync::{FileChangeSet, FileSyncInitOptions, FileSyncOptions, FileSyncPort};
+pub use telemetry::{TelemetryPort, TelemetryTags, TelemetryTimer};
+pub use vectordb::{
+    HybridSearchBatchRequest, HybridSearchData, HybridSearchOptions, HybridSearchRequest,
+    HybridSearchResult, RerankStrategy, RerankStrategyKind, VectorDbPort, VectorDbPortLend,
+    VectorDbProviderInfo, VectorDbRow, VectorDocument, VectorDocumentForInsert,
+    VectorSearchOptions, VectorSearchRequest, VectorSearchResponse, VectorSearchResult,
+};
 
 // Re-export selected domain types used in port signatures, so adapter crates
 // can implement ports without directly depending on `semantic-code-domain`.

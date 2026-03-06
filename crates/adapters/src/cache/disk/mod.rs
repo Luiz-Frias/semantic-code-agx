@@ -1,5 +1,5 @@
 use super::config::DiskCacheProvider;
-use semantic_code_ports::embedding::EmbeddingVector;
+use semantic_code_ports::EmbeddingVector;
 use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, Result};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};

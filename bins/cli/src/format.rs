@@ -13,6 +13,69 @@ pub enum OutputFormat {
     Ndjson,
 }
 
+/// Log level choices for tracing output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum LogLevel {
+    /// Error-level events only.
+    Error,
+    /// Warning and error events.
+    Warn,
+    /// Info, warning, and error events.
+    #[default]
+    Info,
+    /// Debug and above.
+    Debug,
+    /// Trace and above.
+    Trace,
+}
+
+impl LogLevel {
+    /// Returns the env-filter directive string for this level.
+    #[must_use]
+    pub const fn as_filter_directive(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+
+    /// Returns a scoped env-filter directive that limits tracing to workspace crates.
+    ///
+    /// Sets a global `warn` baseline so noisy third-party crates (hyper, tonic,
+    /// reqwest, h2, tower) stay quiet, then enables all `semantic_code_*` workspace
+    /// crates at the requested level. When `RUST_LOG` is set, this is bypassed.
+    #[must_use]
+    pub fn as_scoped_directive(self) -> String {
+        let level = self.as_filter_directive();
+        if matches!(self, Self::Warn) {
+            return level.to_owned();
+        }
+        // All workspace crates share the `semantic_code_` prefix.
+        // Cover the CLI binary + every library crate that emits tracing.
+        let targets = [
+            "semantic_code_cli",
+            "semantic_code_facade",
+            "semantic_code_infra",
+            "semantic_code_app",
+            "semantic_code_adapters",
+            "semantic_code_config",
+            "semantic_code_vector",
+            "semantic_code_dfrr_hnsw",
+        ];
+        let mut directive = String::from("warn");
+        for target in targets {
+            directive.push(',');
+            directive.push_str(target);
+            directive.push('=');
+            directive.push_str(level);
+        }
+        directive
+    }
+}
+
 /// Output-related CLI flags.
 #[derive(Debug, Args)]
 #[expect(
@@ -35,6 +98,9 @@ pub struct OutputArgs {
     /// Emit machine-readable JSON output (legacy alias).
     #[arg(long, global = true, hide = true)]
     pub json: bool,
+    /// Log level for tracing output when `RUST_LOG` is not set.
+    #[arg(long, global = true, value_enum, default_value_t = LogLevel::Info)]
+    pub log_level: LogLevel,
 }
 
 /// Output mode derived from CLI flags.

@@ -1,5 +1,5 @@
 use super::{SCHEMA_VERSION, disk_error, legacy_suffix, now_epoch_ms};
-use semantic_code_ports::embedding::EmbeddingVector;
+use semantic_code_ports::EmbeddingVector;
 use semantic_code_shared::Result;
 use sqlx::{MySql, Row};
 use std::sync::Arc;

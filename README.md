@@ -1,8 +1,8 @@
-# semantic-code-agx
+# semantic-code-agents-rs
 
-[![CI](https://github.com/Luiz-Frias/semantic-code-agx/workflows/CI/badge.svg)](https://github.com/Luiz-Frias/semantic-code-agx/actions)
+[![CI](https://github.com/Luiz-Frias/semantic-code-agents-rs/workflows/CI/badge.svg)](https://github.com/Luiz-Frias/semantic-code-agents-rs/actions)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](https://www.rust-lang.org/)
 
 > **Semantic code search engine** powered by embeddings and vector databases. Find code by meaning, not just keywords.
 
@@ -18,11 +18,12 @@ Traditional code search (grep, ripgrep) finds exact matches. Semantic search und
 
 ## Features
 
-- **Embedding providers**: ONNX (local), OpenAI, Gemini, Voyage, Ollama
-- **Vector databases**: Local HNSW index, Milvus (gRPC/REST)
+- **Embedding providers**: ONNX (local), OpenAI, Gemini, Voyage, Ollama, Apple Neural Engine (feature-gated)
+- **Local vector kernels**: HNSW by default, experimental DFRR, and exact `flat-scan` ground truth
+- **Snapshot v2 + quantization**: mmap-backed local bundles, subset/tile tooling, and storage preflight
 - **AST-aware splitting**: Tree-sitter parsing with line-based fallback
-- **Change-aware reindex**: Snapshot-driven change detection
-- **CLI-first**: Deterministic output for automation and AI agents
+- **Change-aware reindex**: Snapshot-driven change detection with WAL-backed local durability
+- **CLI-first**: Deterministic output for automation and AI agents, including `estimate-storage`, `calibrate`, `snapshot-subset`, `search --stdin-batch`, and structured tracing
 
 ## Quick Start
 
@@ -31,10 +32,10 @@ Traditional code search (grep, ripgrep) finds exact matches. Semantic search und
 Choose one install method:
 
 - `brew install luiz-frias/tap/semantic-code`
-- `curl -fsSL https://github.com/Luiz-Frias/semantic-code-agx/releases/latest/download/install.sh | sh`
+- `curl -fsSL https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/latest/download/install.sh | sh`
 - `winget install --id Luiz-Frias.SemanticCode -e` (Windows)
-- `scoop bucket add semantic-code https://github.com/Luiz-Frias/semantic-code-agx && scoop install semantic-code` (Windows)
-- `mise use -g github:Luiz-Frias/semantic-code-agx@latest`
+- `scoop bucket add semantic-code https://github.com/Luiz-Frias/semantic-code-agents-rs && scoop install semantic-code` (Windows)
+- `mise use -g github:Luiz-Frias/semantic-code-agents-rs@latest`
 - `cargo install semantic-code-cli --locked`
 
 This installs the `sca` and `semantic-code` commands.
@@ -52,6 +53,14 @@ sca init
 This creates `.context/manifest.json` and a default `.context/config.toml`.
 
 ### 3. Index
+
+Optional preflight:
+
+```bash
+sca estimate-storage
+```
+
+Then index:
 
 ```bash
 sca index --init
@@ -87,15 +96,15 @@ Full documentation is available in `docs/`:
 
 ### Prerequisites
 
-- Rust 1.95+
+- Rust 1.96+
 - [mise](https://mise.jdx.dev/) (optional)
 - [just](https://github.com/casey/just)
 
 ### Setup
 
 ```bash
-git clone https://github.com/Luiz-Frias/semantic-code-agx.git
-cd semantic-code-agx
+git clone https://github.com/Luiz-Frias/semantic-code-agents-rs.git
+cd semantic-code-agents-rs
 mise install
 just setup
 ```

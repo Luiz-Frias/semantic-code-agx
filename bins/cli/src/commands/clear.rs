@@ -3,8 +3,7 @@
 use crate::error::{CliError, ExitCode};
 use crate::format::OutputMode;
 use crate::{CliOutput, format_error_output, infra_exit_code};
-use semantic_code_config::{ClearIndexRequestDto, validate_clear_index_request};
-use semantic_code_facade::run_clear_local;
+use semantic_code_facade::{run_clear_local, validate_clear_request_for_root};
 use std::path::Path;
 
 /// Run the clear command.
@@ -14,10 +13,7 @@ pub fn run_clear(
     overrides_json: Option<&str>,
     codebase_root: &Path,
 ) -> Result<CliOutput, CliError> {
-    let request = ClearIndexRequestDto {
-        codebase_root: codebase_root.to_string_lossy().to_string(),
-    };
-    let request = match validate_clear_index_request(&request) {
+    let request = match validate_clear_request_for_root(codebase_root) {
         Ok(request) => request,
         Err(error) => return Ok(format_error_output(mode, &error, infra_exit_code(&error))),
     };

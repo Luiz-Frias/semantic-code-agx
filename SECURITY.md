@@ -2,7 +2,7 @@
 
 ## Reporting Security Vulnerabilities
 
-If you discover a security vulnerability in semantic-code-agx, please report it responsibly by emailing **security@example.com** rather than using the public issue tracker.
+If you discover a security vulnerability in semantic-code-agents-rs, please report it responsibly by emailing **security@example.com** rather than using the public issue tracker.
 
 ### Reporting Guidelines
 

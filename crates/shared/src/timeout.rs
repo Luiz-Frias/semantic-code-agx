@@ -55,6 +55,10 @@ mod tests {
         });
 
         tokio::time::sleep(Duration::from_millis(20)).await;
+        #[allow(
+            clippy::expect_used,
+            reason = "test code: JoinHandle panics are test failures"
+        )]
         let result = task.await.expect("join");
         assert!(result.is_err());
     }
@@ -74,6 +78,10 @@ mod tests {
 
         tokio::task::yield_now().await;
         token.cancel();
+        #[allow(
+            clippy::expect_used,
+            reason = "test code: JoinHandle panics are test failures"
+        )]
         let result = task.await.expect("join");
         assert!(result.is_err());
     }

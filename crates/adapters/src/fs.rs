@@ -39,7 +39,16 @@ impl FileSystemPort for LocalFileSystem {
 
             while let Some(entry) = read_dir.next_entry().await.map_err(ErrorEnvelope::from)? {
                 let file_type = entry.file_type().await.map_err(ErrorEnvelope::from)?;
-                let kind = if file_type.is_file() {
+                // DirEntry::file_type() returns the raw d_type which does NOT
+                // follow symlinks — symlinks appear as neither file nor dir.
+                // Resolve through symlinks so a symlink forest is transparent.
+                let kind = if file_type.is_symlink() {
+                    match tokio::fs::metadata(entry.path()).await {
+                        Ok(meta) if meta.is_file() => FileSystemEntryKind::File,
+                        Ok(meta) if meta.is_dir() => FileSystemEntryKind::Directory,
+                        _ => FileSystemEntryKind::Other,
+                    }
+                } else if file_type.is_file() {
                     FileSystemEntryKind::File
                 } else if file_type.is_dir() {
                     FileSystemEntryKind::Directory

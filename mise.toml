@@ -1,10 +1,16 @@
-# mise.toml - semantic-code-agx
+# mise.toml - semantic-code-agents-rs
 # Unified version management + env vars
 # Docs: https://mise.jdx.dev/
 
 [env]
 # SOPS age key location (for encrypted secrets)
 SOPS_AGE_KEY_FILE = "{{env.HOME}}/.config/sops/age/keys.txt"
+
+# C++ compiler: use g++ instead of the default c++ (clang) so that
+# crates with C++ build scripts (e.g. esaxx-rs) can find <cstdint>
+# and link against libstdc++. Clang on this toolchain is missing the
+# C++ standard library headers in its default search path.
+CXX = "g++"
 
 # Auto-activate .venv when entering directory (mise uses uv to create it)
 # uv reads Python version from .python-version or pyproject.toml [project.requires-python]
@@ -28,13 +34,18 @@ RUSTC_WRAPPER = "sccache"
 # Load secrets from .env (API keys, etc.)
 _.file = ".env"
 
+# Auto-start sccache when entering this directory.
+# No-op if already running (~0ms). Ensures RUSTC_WRAPPER=sccache always works.
+[hooks.enter]
+run = "sccache --start-server 2>/dev/null || true"
+
 [settings.python]
 # Use uv for venv creation when uv.lock exists (no mise Python needed)
 uv_venv_auto = true
 
 [tools]
 # Rust nightly (edition 2024)
-rust = "nightly"
+rust = "nightly-2026-03-01"
 just = "latest"
 # Native build tools for optional features (onnx/tokenizers/grpc)
 cmake = "latest"
@@ -58,6 +69,9 @@ bats = "latest"       # Bash automated testing
 hadolint = "latest"   # Dockerfile linter
 yamllint = "latest"   # YAML linter
 actionlint = "latest" # GitHub Actions workflow linter
+# Profiling & debugging (project-scoped; LLDB requires Homebrew: `brew install llvm`)
+"cargo:samply" = "latest"     # CPU profiler (wraps perf/dtrace)
+"cargo:ferroscope" = "latest" # MCP debugger server (LLDB backend)
 
 [tasks.check]
 description = "Run quality checks (fmt + clippy + test-unit)"
