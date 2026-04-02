@@ -2,15 +2,19 @@
 
 use crate::InfraResult;
 use crate::cli_calibration::read_calibration;
-use semantic_code_adapters::{FixedDimensionVectorDb, LocalVectorDb};
+use semantic_code_adapters::{
+    DfrrReadyStatePrewarmRequest, DfrrReadyStateRequirement, FixedDimensionVectorDb, LocalVectorDb,
+};
 #[cfg(feature = "experimental-dfrr-kernel")]
 use semantic_code_config::DfrrQueryStrategy;
 use semantic_code_config::{
     DfrrBq1Threshold, DfrrSearchConfig, HnswSearchConfig, SnapshotStorageMode,
     ValidatedBackendConfig, VectorKernelKind, VectorSearchStrategy,
 };
+#[cfg(feature = "experimental-dfrr-kernel")]
+use semantic_code_dfrr_hnsw::{DfrrKernel, DfrrKernelConfig, FrontierRankSurface};
 use semantic_code_ports::VectorDbPort;
-use semantic_code_shared::{ErrorCode, ErrorEnvelope};
+use semantic_code_shared::{CancellationToken, ErrorCode, ErrorEnvelope};
 use semantic_code_vector::{FlatScanKernel, HnswKernel, VectorKernel};
 use std::path::Path;
 use std::sync::Arc;
@@ -28,7 +32,26 @@ enum ProviderKind {
     MilvusRest,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DfrrPrewarmPlanSummary {
+    pub unique_ready_states: Vec<Box<str>>,
+}
+
+impl DfrrPrewarmPlanSummary {
+    pub fn total_unique_ready_states(&self) -> u64 {
+        u64::try_from(self.unique_ready_states.len()).unwrap_or(u64::MAX)
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.unique_ready_states.is_empty()
+    }
+}
+
 /// Build a vector DB port using config settings.
+///
+/// For the local provider, the collection loader actor serializes
+/// load/evict lifecycle operations via a bounded channel while the
+/// hot search/insert path uses the shared `RwLock<HashMap>` directly.
 #[tracing::instrument(
     name = "vectordb.factory",
     skip_all,
@@ -73,6 +96,12 @@ pub async fn build_vectordb_port(
                 config.vector_db.hnsw_search.as_ref(),
                 effective_dfrr_search,
             )?;
+            let runtime_dfrr_ready_state =
+                build_runtime_dfrr_ready_state_requirement(kernel_kind, effective_dfrr_search)?;
+            let dfrr_prewarm_requests = build_dfrr_prewarm_requests(
+                config.vector_db.dfrr_prewarm_searches.as_slice(),
+                runtime_dfrr_ready_state.as_ref(),
+            )?;
             if kernel_kind != VectorKernelKind::HnswRs {
                 tracing::warn!(
                     kernel = ?kernel_kind,
@@ -85,20 +114,54 @@ pub async fn build_vectordb_port(
                     "vectorDb.searchStrategy uses an experimental local search path"
                 );
             }
-            let adapter = LocalVectorDb::new(
+            let adapter = LocalVectorDb::new_with_dfrr_prewarm(
                 codebase_root.to_path_buf(),
                 snapshot_storage,
                 config.vector_db.snapshot_format,
                 config.vector_db.snapshot_max_bytes,
                 kernel,
+                runtime_dfrr_ready_state,
+                dfrr_prewarm_requests,
                 config.vector_db.force_reindex_on_kernel_change,
                 search_strategy,
+                CancellationToken::new(),
             )?;
             Ok(wrap_vectordb_fixed(config.embedding.dimension, adapter))
         },
         ProviderKind::MilvusGrpc => build_milvus_grpc(config).await,
         ProviderKind::MilvusRest => build_milvus_rest(config),
     }
+}
+
+pub fn summarize_dfrr_prewarm_plan(
+    config: &ValidatedBackendConfig,
+) -> InfraResult<DfrrPrewarmPlanSummary> {
+    let kernel_kind = config.vector_db.effective_vector_kernel();
+    let effective_dfrr_search = if kernel_kind == VectorKernelKind::Dfrr {
+        config.vector_db.dfrr_search.as_ref()
+    } else {
+        None
+    };
+    let runtime_requirement =
+        build_runtime_dfrr_ready_state_requirement(kernel_kind, effective_dfrr_search)?;
+    let prewarm_requests = build_dfrr_prewarm_requests(
+        config.vector_db.dfrr_prewarm_searches.as_slice(),
+        runtime_requirement.as_ref(),
+    )?;
+
+    let mut unique_ready_states = Vec::new();
+    if let Some(runtime_requirement) = runtime_requirement {
+        unique_ready_states.push(runtime_requirement.ready_state_fingerprint);
+    }
+    unique_ready_states.extend(
+        prewarm_requests
+            .into_iter()
+            .map(|request| request.requirement.ready_state_fingerprint),
+    );
+
+    Ok(DfrrPrewarmPlanSummary {
+        unique_ready_states,
+    })
 }
 
 /// Build a concrete `VectorKernel` trait object from the config-level kernel kind.
@@ -123,91 +186,164 @@ pub fn build_local_kernel(
 fn build_dfrr_kernel(
     dfrr_search: Option<&DfrrSearchConfig>,
 ) -> InfraResult<Arc<dyn VectorKernel + Send + Sync>> {
-    use semantic_code_dfrr_hnsw::{
-        Bq1Threshold, ClusterCount, ClusteringConfig, DfrrConfig, DfrrKernel, DfrrKernelConfig,
-        DfrrLoopConfig, EfSearch, FrontierConfig, MaxIterations, PivotConfig,
-        QueryRankStrategyKind,
-    };
-
-    let config = if let Some(search) = dfrr_search {
-        let query_strategy = match search.query_strategy {
-            DfrrQueryStrategy::Static => QueryRankStrategyKind::Static,
-            DfrrQueryStrategy::NearestCentroid => QueryRankStrategyKind::NearestCentroid,
-            DfrrQueryStrategy::NearestCentroidMultiProbe => {
-                QueryRankStrategyKind::NearestCentroidMultiProbe {
-                    probe_count: search.query_probe_count,
-                    min_cluster_size: search.query_min_cluster_size,
-                }
-            },
-        };
-
-        let max_iterations = MaxIterations::try_from(search.max_iterations).map_err(|message| {
-            ErrorEnvelope::expected(
-                ErrorCode::invalid_input(),
-                format!("invalid vectorDb.dfrrSearch.maxIterations: {message}"),
-            )
-            .with_metadata("field", "vectorDb.dfrrSearch.maxIterations")
-            .with_metadata("value", search.max_iterations.to_string())
-        })?;
-        let ef_search = EfSearch::try_from(search.ef_search).map_err(|message| {
-            ErrorEnvelope::expected(
-                ErrorCode::invalid_input(),
-                format!("invalid vectorDb.dfrrSearch.efSearch: {message}"),
-            )
-            .with_metadata("field", "vectorDb.dfrrSearch.efSearch")
-            .with_metadata("value", search.ef_search.to_string())
-        })?;
-        let bq1_threshold = search
-            .bq1_threshold
-            .map(DfrrBq1Threshold::into_inner)
-            .map(Bq1Threshold::try_from)
-            .transpose()
-            .map_err(|message| {
-                ErrorEnvelope::expected(
-                    ErrorCode::invalid_input(),
-                    format!("invalid vectorDb.dfrrSearch.bq1Threshold: {message}"),
-                )
-            })?;
-        let cluster_count = ClusterCount::try_from(search.cluster_count).map_err(|message| {
-            ErrorEnvelope::expected(
-                ErrorCode::invalid_input(),
-                format!("invalid vectorDb.dfrrSearch.clusterCount: {message}"),
-            )
-            .with_metadata("field", "vectorDb.dfrrSearch.clusterCount")
-            .with_metadata("value", search.cluster_count.to_string())
-        })?;
-
-        DfrrKernelConfig {
-            loop_config: DfrrLoopConfig {
-                frontier: FrontierConfig {
-                    bucket_count: search.bucket_count,
-                    pull_size: search.pull_size,
-                    split_threshold: search.split_threshold,
-                    adaptive_bucket_widths: search.adaptive_bucket_widths,
-                    refine_after_first_pull: search.refine_after_first_pull,
-                },
-                pivots: PivotConfig {
-                    pivot_count: search.pivot_count,
-                    base_level_pivot_multiplier: search.base_level_pivot_multiplier,
-                },
-                max_iterations,
-                ef_search,
-                enable_exhaustion_guard: search.enable_exhaustion_guard,
-                bq1_threshold,
-            },
-            graph_config: DfrrConfig {
-                ef_search: search.ef_search,
-                ..DfrrConfig::default()
-            },
-            clustering: ClusteringConfig {
-                cluster_count,
-                query_strategy,
-            },
-        }
-    } else {
-        DfrrKernelConfig::default()
-    };
+    let config = resolve_dfrr_kernel_config(dfrr_search)?;
     Ok(Arc::new(DfrrKernel::new(config)))
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn resolve_dfrr_kernel_config(
+    dfrr_search: Option<&DfrrSearchConfig>,
+) -> InfraResult<DfrrKernelConfig> {
+    dfrr_search.map_or_else(|| Ok(DfrrKernelConfig::default()), build_dfrr_kernel_config)
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn build_dfrr_kernel_config(search: &DfrrSearchConfig) -> InfraResult<DfrrKernelConfig> {
+    use semantic_code_dfrr_hnsw::{ClusteringConfig, DfrrConfig};
+
+    Ok(DfrrKernelConfig {
+        loop_config: build_dfrr_loop_config(search)?,
+        graph_config: DfrrConfig::default(),
+        clustering: ClusteringConfig {
+            cluster_count: parse_dfrr_cluster_count(search)?,
+            query_strategy: build_dfrr_query_strategy(search),
+            ..ClusteringConfig::default()
+        },
+    })
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn build_dfrr_loop_config(
+    search: &DfrrSearchConfig,
+) -> InfraResult<semantic_code_dfrr_hnsw::DfrrLoopConfig> {
+    use semantic_code_config::DfrrBq1ThresholdMode;
+    use semantic_code_dfrr_hnsw::{Bq1ThresholdMode, DfrrLoopConfig, FrontierConfig, PivotConfig};
+
+    Ok(DfrrLoopConfig {
+        frontier: FrontierConfig {
+            bucket_count: search.bucket_count,
+            pull_size: search.pull_size,
+            split_threshold: search.split_threshold,
+            adaptive_bucket_widths: search.adaptive_bucket_widths,
+            refine_after_first_pull: search.refine_after_first_pull,
+        },
+        frontier_rank_surface: FrontierRankSurface::default(),
+        pivots: PivotConfig {
+            pivot_count: search.pivot_count,
+            base_level_pivot_multiplier: search.base_level_pivot_multiplier,
+        },
+        max_iterations: parse_dfrr_max_iterations(search)?,
+        ef_search: parse_dfrr_ef_search(search)?,
+        enable_exhaustion_guard: search.enable_exhaustion_guard,
+        bq1_threshold: parse_optional_dfrr_bq1_threshold(
+            search.bq1_threshold,
+            "vectorDb.dfrrSearch.bq1Threshold",
+        )?,
+        bq1_threshold_mode: match search.bq1_threshold_mode {
+            DfrrBq1ThresholdMode::RawDistance => Bq1ThresholdMode::RawDistance,
+            DfrrBq1ThresholdMode::ClusterPercentile => Bq1ThresholdMode::ClusterPercentile,
+        },
+        bq1_percentile_assist_sample_count: search.bq1_percentile_assist_sample_count,
+        bq1_percentile_assist_target_rank: parse_optional_dfrr_bq1_threshold(
+            search.bq1_percentile_assist_target_rank,
+            "vectorDb.dfrrSearch.bq1PercentileAssistTargetRank",
+        )?,
+    })
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+const fn build_dfrr_query_strategy(
+    search: &DfrrSearchConfig,
+) -> semantic_code_dfrr_hnsw::QueryRankStrategyKind {
+    use semantic_code_dfrr_hnsw::QueryRankStrategyKind;
+
+    match search.query_strategy {
+        DfrrQueryStrategy::Static => QueryRankStrategyKind::Static,
+        DfrrQueryStrategy::NearestCentroid => QueryRankStrategyKind::NearestCentroid,
+        DfrrQueryStrategy::NearestCentroidMultiProbe => {
+            QueryRankStrategyKind::NearestCentroidMultiProbe {
+                probe_count: search.query_probe_count,
+                min_cluster_size: search.query_min_cluster_size,
+            }
+        },
+    }
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn parse_dfrr_max_iterations(
+    search: &DfrrSearchConfig,
+) -> InfraResult<semantic_code_dfrr_hnsw::MaxIterations> {
+    use semantic_code_dfrr_hnsw::MaxIterations;
+
+    MaxIterations::try_from(search.max_iterations).map_err(|message| {
+        invalid_dfrr_search_field(
+            "vectorDb.dfrrSearch.maxIterations",
+            &search.max_iterations,
+            message,
+        )
+    })
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn parse_dfrr_ef_search(
+    search: &DfrrSearchConfig,
+) -> InfraResult<semantic_code_dfrr_hnsw::EfSearch> {
+    use semantic_code_dfrr_hnsw::EfSearch;
+
+    EfSearch::try_from(search.ef_search).map_err(|message| {
+        invalid_dfrr_search_field("vectorDb.dfrrSearch.efSearch", &search.ef_search, message)
+    })
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn parse_dfrr_cluster_count(
+    search: &DfrrSearchConfig,
+) -> InfraResult<semantic_code_dfrr_hnsw::ClusterCount> {
+    use semantic_code_dfrr_hnsw::ClusterCount;
+
+    ClusterCount::try_from(search.cluster_count).map_err(|message| {
+        invalid_dfrr_search_field(
+            "vectorDb.dfrrSearch.clusterCount",
+            &search.cluster_count,
+            message,
+        )
+    })
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn parse_optional_dfrr_bq1_threshold(
+    value: Option<DfrrBq1Threshold>,
+    field: &'static str,
+) -> InfraResult<Option<semantic_code_dfrr_hnsw::Bq1Threshold>> {
+    use semantic_code_dfrr_hnsw::Bq1Threshold;
+
+    value
+        .map(DfrrBq1Threshold::into_inner)
+        .map(Bq1Threshold::try_from)
+        .transpose()
+        .map_err(|message| invalid_dfrr_search_field_without_value(field, message))
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn invalid_dfrr_search_field(
+    field: &'static str,
+    value: &impl ToString,
+    message: impl std::fmt::Display,
+) -> ErrorEnvelope {
+    invalid_dfrr_search_field_without_value(field, message)
+        .with_metadata("value", value.to_string())
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn invalid_dfrr_search_field_without_value(
+    field: &'static str,
+    message: impl std::fmt::Display,
+) -> ErrorEnvelope {
+    ErrorEnvelope::expected(
+        ErrorCode::invalid_input(),
+        format!("invalid {field}: {message}"),
+    )
+    .with_metadata("field", field)
 }
 
 #[cfg(not(feature = "experimental-dfrr-kernel"))]
@@ -217,6 +353,97 @@ fn build_dfrr_kernel(
     Err(ErrorEnvelope::expected(
         ErrorCode::new("vector", "kernel_unsupported"),
         "DFRR kernel requires the experimental-dfrr-kernel feature flag",
+    )
+    .with_metadata("requestedKernel", "dfrr"))
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn build_runtime_dfrr_ready_state_requirement(
+    kernel_kind: VectorKernelKind,
+    dfrr_search: Option<&DfrrSearchConfig>,
+) -> InfraResult<Option<DfrrReadyStateRequirement>> {
+    if kernel_kind != VectorKernelKind::Dfrr {
+        return Ok(None);
+    }
+
+    let config = resolve_dfrr_kernel_config(dfrr_search)?;
+    let fingerprint = config.ready_state_config_fingerprint().to_string();
+    let search_config_json = serde_json::to_string_pretty(
+        &dfrr_search.copied().unwrap_or_default(),
+    )
+    .map_err(|error| {
+        ErrorEnvelope::unexpected(
+            ErrorCode::new("vector", "dfrr_prewarm_config_serialize_failed"),
+            format!("failed to serialize DFRR runtime ready-state config: {error}"),
+            semantic_code_shared::ErrorClass::NonRetriable,
+        )
+    })?;
+    Ok(Some(DfrrReadyStateRequirement {
+        ready_state_fingerprint: fingerprint.into_boxed_str(),
+        config_json: search_config_json.into_boxed_str(),
+    }))
+}
+
+#[cfg(not(feature = "experimental-dfrr-kernel"))]
+fn build_runtime_dfrr_ready_state_requirement(
+    _kernel_kind: VectorKernelKind,
+    _dfrr_search: Option<&DfrrSearchConfig>,
+) -> InfraResult<Option<DfrrReadyStateRequirement>> {
+    Ok(None)
+}
+
+#[cfg(feature = "experimental-dfrr-kernel")]
+fn build_dfrr_prewarm_requests(
+    searches: &[DfrrSearchConfig],
+    runtime_requirement: Option<&DfrrReadyStateRequirement>,
+) -> InfraResult<Vec<DfrrReadyStatePrewarmRequest>> {
+    use std::collections::BTreeSet;
+
+    let mut requests = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(runtime_requirement) = runtime_requirement {
+        seen.insert(runtime_requirement.ready_state_fingerprint.clone());
+    }
+
+    for search in searches {
+        let config = resolve_dfrr_kernel_config(Some(search))?;
+        let fingerprint = config
+            .ready_state_config_fingerprint()
+            .to_string()
+            .into_boxed_str();
+        if !seen.insert(fingerprint.clone()) {
+            continue;
+        }
+        let config_json = serde_json::to_string_pretty(search).map_err(|error| {
+            ErrorEnvelope::unexpected(
+                ErrorCode::new("vector", "dfrr_prewarm_config_serialize_failed"),
+                format!("failed to serialize DFRR prewarm config: {error}"),
+                semantic_code_shared::ErrorClass::NonRetriable,
+            )
+        })?;
+        requests.push(DfrrReadyStatePrewarmRequest {
+            requirement: DfrrReadyStateRequirement {
+                ready_state_fingerprint: fingerprint,
+                config_json: config_json.into_boxed_str(),
+            },
+            kernel: build_dfrr_kernel(Some(search))?,
+        });
+    }
+
+    Ok(requests)
+}
+
+#[cfg(not(feature = "experimental-dfrr-kernel"))]
+fn build_dfrr_prewarm_requests(
+    searches: &[DfrrSearchConfig],
+    _runtime_requirement: Option<&DfrrReadyStateRequirement>,
+) -> InfraResult<Vec<DfrrReadyStatePrewarmRequest>> {
+    if searches.is_empty() {
+        return Ok(Vec::new());
+    }
+    Err(ErrorEnvelope::expected(
+        ErrorCode::new("vector", "kernel_unsupported"),
+        "DFRR prewarm requires the experimental-dfrr-kernel feature flag",
     )
     .with_metadata("requestedKernel", "dfrr"))
 }
@@ -493,7 +720,7 @@ mod tests {
             query_probe_count: 4,
             query_min_cluster_size: 12,
             bq1_threshold: Some(DfrrBq1Threshold::new(0.30)),
-            auto_calibrate: false,
+            ..DfrrSearchConfig::default()
         };
 
         let result = build_local_kernel(VectorKernelKind::Dfrr, None, Some(&dfrr_search));
@@ -506,5 +733,76 @@ mod tests {
         } else {
             assert!(result.is_err());
         }
+    }
+
+    #[cfg(feature = "experimental-dfrr-kernel")]
+    #[test]
+    fn summarize_dfrr_prewarm_plan_uses_unique_ready_state_fingerprints() -> InfraResult<()> {
+        let mut raw = semantic_code_config::BackendConfig::default();
+        raw.vector_db.vector_kernel = Some(VectorKernelKind::Dfrr);
+        raw.vector_db.dfrr_search = Some(DfrrSearchConfig {
+            ef_search: 64,
+            cluster_count: 8,
+            ..DfrrSearchConfig::default()
+        });
+        raw.vector_db.dfrr_prewarm_searches = vec![
+            DfrrSearchConfig {
+                ef_search: 64,
+                cluster_count: 8,
+                ..DfrrSearchConfig::default()
+            },
+            DfrrSearchConfig {
+                ef_search: 512,
+                cluster_count: 8,
+                ..DfrrSearchConfig::default()
+            },
+        ];
+        let config = raw.validate_and_normalize().map_err(ErrorEnvelope::from)?;
+
+        let summary = summarize_dfrr_prewarm_plan(&config)?;
+        assert_eq!(summary.total_unique_ready_states(), 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "experimental-dfrr-kernel")]
+    #[test]
+    fn dfrr_ready_state_fingerprint_ignores_query_time_ef_search() -> InfraResult<()> {
+        let base = DfrrSearchConfig {
+            ef_search: 64,
+            cluster_count: 8,
+            query_strategy: DfrrQueryStrategy::Static,
+            ..DfrrSearchConfig::default()
+        };
+        let changed_query_ef = DfrrSearchConfig {
+            ef_search: 512,
+            ..base
+        };
+
+        let base_requirement =
+            build_runtime_dfrr_ready_state_requirement(VectorKernelKind::Dfrr, Some(&base))?
+                .ok_or_else(|| {
+                    ErrorEnvelope::unexpected(
+                        ErrorCode::new("vector", "dfrr_prewarm_requirement_missing"),
+                        "expected DFRR ready-state requirement",
+                        semantic_code_shared::ErrorClass::NonRetriable,
+                    )
+                })?;
+        let changed_requirement = build_runtime_dfrr_ready_state_requirement(
+            VectorKernelKind::Dfrr,
+            Some(&changed_query_ef),
+        )?
+        .ok_or_else(|| {
+            ErrorEnvelope::unexpected(
+                ErrorCode::new("vector", "dfrr_prewarm_requirement_missing"),
+                "expected DFRR ready-state requirement",
+                semantic_code_shared::ErrorClass::NonRetriable,
+            )
+        })?;
+
+        assert_eq!(
+            base_requirement.ready_state_fingerprint,
+            changed_requirement.ready_state_fingerprint
+        );
+        Ok(())
     }
 }

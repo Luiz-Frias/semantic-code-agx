@@ -404,11 +404,91 @@ impl From<semantic_code_app::IndexCodebaseStatus> for IndexCodebaseStatus {
 /// Scan stage stats for indexing output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct IndexFunctionTimingStats {
+    /// Number of calls recorded for this function.
+    pub calls: u64,
+    /// Cumulative elapsed time in milliseconds.
+    pub duration_ms: u64,
+}
+
+impl From<semantic_code_app::FunctionTimingStats> for IndexFunctionTimingStats {
+    fn from(value: semantic_code_app::FunctionTimingStats) -> Self {
+        Self {
+            calls: value.calls,
+            duration_ms: value.duration_ms,
+        }
+    }
+}
+
+/// Prepare-stage function breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexPrepareBreakdown {
+    pub has_collection: IndexFunctionTimingStats,
+    pub drop_collection: IndexFunctionTimingStats,
+    pub detect_dimension: IndexFunctionTimingStats,
+    pub create_collection: IndexFunctionTimingStats,
+}
+
+impl From<semantic_code_app::PrepareFunctionStats> for IndexPrepareBreakdown {
+    fn from(value: semantic_code_app::PrepareFunctionStats) -> Self {
+        Self {
+            has_collection: value.has_collection.into(),
+            drop_collection: value.drop_collection.into(),
+            detect_dimension: value.detect_dimension.into(),
+            create_collection: value.create_collection.into(),
+        }
+    }
+}
+
+/// Prepare stage stats for indexing output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexPrepareStats {
+    /// Elapsed time in milliseconds.
+    pub duration_ms: u64,
+    /// Function-level prepare breakdown.
+    pub breakdown: IndexPrepareBreakdown,
+}
+
+impl From<semantic_code_app::PrepareStageStats> for IndexPrepareStats {
+    fn from(value: semantic_code_app::PrepareStageStats) -> Self {
+        Self {
+            duration_ms: value.duration_ms,
+            breakdown: value.breakdown.into(),
+        }
+    }
+}
+
+/// Scan-stage function breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexScanBreakdown {
+    pub load_ignore_patterns: IndexFunctionTimingStats,
+    pub scan_code_files: IndexFunctionTimingStats,
+    pub filter_files: IndexFunctionTimingStats,
+}
+
+impl From<semantic_code_app::ScanFunctionStats> for IndexScanBreakdown {
+    fn from(value: semantic_code_app::ScanFunctionStats) -> Self {
+        Self {
+            load_ignore_patterns: value.load_ignore_patterns.into(),
+            scan_code_files: value.scan_code_files.into(),
+            filter_files: value.filter_files.into(),
+        }
+    }
+}
+
+/// Scan stage stats for indexing output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IndexScanStats {
     /// Files discovered for indexing.
     pub files: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level scan breakdown.
+    pub breakdown: IndexScanBreakdown,
 }
 
 impl From<semantic_code_app::ScanStageStats> for IndexScanStats {
@@ -416,6 +496,28 @@ impl From<semantic_code_app::ScanStageStats> for IndexScanStats {
         Self {
             files: value.files,
             duration_ms: value.duration_ms,
+            breakdown: value.breakdown.into(),
+        }
+    }
+}
+
+/// Split-stage function breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexSplitBreakdown {
+    pub file_passes_size_check: IndexFunctionTimingStats,
+    pub read_file_text_or_skip: IndexFunctionTimingStats,
+    pub split_file_or_skip: IndexFunctionTimingStats,
+    pub await_file_task: IndexFunctionTimingStats,
+}
+
+impl From<semantic_code_app::SplitFunctionStats> for IndexSplitBreakdown {
+    fn from(value: semantic_code_app::SplitFunctionStats) -> Self {
+        Self {
+            file_passes_size_check: value.file_passes_size_check.into(),
+            read_file_text_or_skip: value.read_file_text_or_skip.into(),
+            split_file_or_skip: value.split_file_or_skip.into(),
+            await_file_task: value.await_file_task.into(),
         }
     }
 }
@@ -430,6 +532,8 @@ pub struct IndexSplitStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level split breakdown.
+    pub breakdown: IndexSplitBreakdown,
 }
 
 impl From<semantic_code_app::SplitStageStats> for IndexSplitStats {
@@ -438,6 +542,28 @@ impl From<semantic_code_app::SplitStageStats> for IndexSplitStats {
             files: value.files,
             chunks: value.chunks,
             duration_ms: value.duration_ms,
+            breakdown: value.breakdown.into(),
+        }
+    }
+}
+
+/// Embed-stage function breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexEmbedBreakdown {
+    pub queue_latency: IndexFunctionTimingStats,
+    pub provider_embed_batch: IndexFunctionTimingStats,
+    pub build_insert_documents: IndexFunctionTimingStats,
+    pub await_embedding_task: IndexFunctionTimingStats,
+}
+
+impl From<semantic_code_app::EmbedFunctionStats> for IndexEmbedBreakdown {
+    fn from(value: semantic_code_app::EmbedFunctionStats) -> Self {
+        Self {
+            queue_latency: value.queue_latency.into(),
+            provider_embed_batch: value.provider_embed_batch.into(),
+            build_insert_documents: value.build_insert_documents.into(),
+            await_embedding_task: value.await_embedding_task.into(),
         }
     }
 }
@@ -452,6 +578,8 @@ pub struct IndexEmbedStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level embed breakdown.
+    pub breakdown: IndexEmbedBreakdown,
 }
 
 impl From<semantic_code_app::EmbedStageStats> for IndexEmbedStats {
@@ -460,6 +588,24 @@ impl From<semantic_code_app::EmbedStageStats> for IndexEmbedStats {
             batches: value.batches,
             chunks: value.chunks,
             duration_ms: value.duration_ms,
+            breakdown: value.breakdown.into(),
+        }
+    }
+}
+
+/// Insert-stage function breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexInsertBreakdown {
+    pub provider_insert_batch: IndexFunctionTimingStats,
+    pub await_insert_task: IndexFunctionTimingStats,
+}
+
+impl From<semantic_code_app::InsertFunctionStats> for IndexInsertBreakdown {
+    fn from(value: semantic_code_app::InsertFunctionStats) -> Self {
+        Self {
+            provider_insert_batch: value.provider_insert_batch.into(),
+            await_insert_task: value.await_insert_task.into(),
         }
     }
 }
@@ -474,6 +620,8 @@ pub struct IndexInsertStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level insert breakdown.
+    pub breakdown: IndexInsertBreakdown,
 }
 
 impl From<semantic_code_app::InsertStageStats> for IndexInsertStats {
@@ -482,6 +630,7 @@ impl From<semantic_code_app::InsertStageStats> for IndexInsertStats {
             batches: value.batches,
             chunks: value.chunks,
             duration_ms: value.duration_ms,
+            breakdown: value.breakdown.into(),
         }
     }
 }
@@ -490,6 +639,8 @@ impl From<semantic_code_app::InsertStageStats> for IndexInsertStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexStageStats {
+    /// Prepare stage stats.
+    pub prepare: IndexPrepareStats,
     /// Scan stage stats.
     pub scan: IndexScanStats,
     /// Split stage stats.
@@ -503,6 +654,7 @@ pub struct IndexStageStats {
 impl From<semantic_code_app::IndexStageStats> for IndexStageStats {
     fn from(value: semantic_code_app::IndexStageStats) -> Self {
         Self {
+            prepare: value.prepare.into(),
             scan: value.scan.into(),
             split: value.split.into(),
             embed: value.embed.into(),
@@ -989,11 +1141,55 @@ impl From<semantic_code_infra::JobProgress> for JobProgress {
 /// Job-friendly scan stats.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct JobFunctionTimingStats {
+    pub calls: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobPrepareBreakdown {
+    pub has_collection: JobFunctionTimingStats,
+    pub drop_collection: JobFunctionTimingStats,
+    pub detect_dimension: JobFunctionTimingStats,
+    pub create_collection: JobFunctionTimingStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobPrepareStats {
+    pub duration_ms: u64,
+    pub breakdown: JobPrepareBreakdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobScanBreakdown {
+    pub load_ignore_patterns: JobFunctionTimingStats,
+    pub scan_code_files: JobFunctionTimingStats,
+    pub filter_files: JobFunctionTimingStats,
+}
+
+/// Job-friendly scan stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JobScanStats {
     /// Files discovered for indexing.
     pub files: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level scan breakdown.
+    pub breakdown: JobScanBreakdown,
+}
+
+/// Job-friendly split stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobSplitBreakdown {
+    pub file_passes_size_check: JobFunctionTimingStats,
+    pub read_file_text_or_skip: JobFunctionTimingStats,
+    pub split_file_or_skip: JobFunctionTimingStats,
+    pub await_file_task: JobFunctionTimingStats,
 }
 
 /// Job-friendly split stats.
@@ -1006,6 +1202,18 @@ pub struct JobSplitStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level split breakdown.
+    pub breakdown: JobSplitBreakdown,
+}
+
+/// Job-friendly embed stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobEmbedBreakdown {
+    pub queue_latency: JobFunctionTimingStats,
+    pub provider_embed_batch: JobFunctionTimingStats,
+    pub build_insert_documents: JobFunctionTimingStats,
+    pub await_embedding_task: JobFunctionTimingStats,
 }
 
 /// Job-friendly embed stats.
@@ -1018,6 +1226,16 @@ pub struct JobEmbedStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level embed breakdown.
+    pub breakdown: JobEmbedBreakdown,
+}
+
+/// Job-friendly insert stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobInsertBreakdown {
+    pub provider_insert_batch: JobFunctionTimingStats,
+    pub await_insert_task: JobFunctionTimingStats,
 }
 
 /// Job-friendly insert stats.
@@ -1030,12 +1248,16 @@ pub struct JobInsertStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level insert breakdown.
+    pub breakdown: JobInsertBreakdown,
 }
 
 /// Job-friendly stage stats for indexing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStageStats {
+    /// Prepare stage stats.
+    pub prepare: JobPrepareStats,
     /// Scan stage stats.
     pub scan: JobScanStats,
     /// Split stage stats.
@@ -1059,7 +1281,7 @@ pub enum JobResult {
         /// Index completion status.
         index_status: Box<str>,
         /// Stage-level ingestion stats.
-        stage_stats: JobStageStats,
+        stage_stats: Box<JobStageStats>,
     },
     /// Reindex job result.
     Reindex {
@@ -1072,6 +1294,99 @@ pub enum JobResult {
     },
 }
 
+macro_rules! infra_job_timing_stats {
+    ($stats:expr) => {
+        JobFunctionTimingStats {
+            calls: $stats.calls,
+            duration_ms: $stats.duration_ms,
+        }
+    };
+}
+
+macro_rules! facade_job_stage_stats {
+    ($stats:expr) => {
+        JobStageStats {
+            prepare: JobPrepareStats {
+                duration_ms: $stats.prepare.duration_ms,
+                breakdown: JobPrepareBreakdown {
+                    has_collection: infra_job_timing_stats!(
+                        $stats.prepare.breakdown.has_collection
+                    ),
+                    drop_collection: infra_job_timing_stats!(
+                        $stats.prepare.breakdown.drop_collection
+                    ),
+                    detect_dimension: infra_job_timing_stats!(
+                        $stats.prepare.breakdown.detect_dimension
+                    ),
+                    create_collection: infra_job_timing_stats!(
+                        $stats.prepare.breakdown.create_collection
+                    ),
+                },
+            },
+            scan: JobScanStats {
+                files: $stats.scan.files,
+                duration_ms: $stats.scan.duration_ms,
+                breakdown: JobScanBreakdown {
+                    load_ignore_patterns: infra_job_timing_stats!(
+                        $stats.scan.breakdown.load_ignore_patterns
+                    ),
+                    scan_code_files: infra_job_timing_stats!($stats.scan.breakdown.scan_code_files),
+                    filter_files: infra_job_timing_stats!($stats.scan.breakdown.filter_files),
+                },
+            },
+            split: JobSplitStats {
+                files: $stats.split.files,
+                chunks: $stats.split.chunks,
+                duration_ms: $stats.split.duration_ms,
+                breakdown: JobSplitBreakdown {
+                    file_passes_size_check: infra_job_timing_stats!(
+                        $stats.split.breakdown.file_passes_size_check
+                    ),
+                    read_file_text_or_skip: infra_job_timing_stats!(
+                        $stats.split.breakdown.read_file_text_or_skip
+                    ),
+                    split_file_or_skip: infra_job_timing_stats!(
+                        $stats.split.breakdown.split_file_or_skip
+                    ),
+                    await_file_task: infra_job_timing_stats!(
+                        $stats.split.breakdown.await_file_task
+                    ),
+                },
+            },
+            embed: JobEmbedStats {
+                batches: $stats.embed.batches,
+                chunks: $stats.embed.chunks,
+                duration_ms: $stats.embed.duration_ms,
+                breakdown: JobEmbedBreakdown {
+                    queue_latency: infra_job_timing_stats!($stats.embed.breakdown.queue_latency),
+                    provider_embed_batch: infra_job_timing_stats!(
+                        $stats.embed.breakdown.provider_embed_batch
+                    ),
+                    build_insert_documents: infra_job_timing_stats!(
+                        $stats.embed.breakdown.build_insert_documents
+                    ),
+                    await_embedding_task: infra_job_timing_stats!(
+                        $stats.embed.breakdown.await_embedding_task
+                    ),
+                },
+            },
+            insert: JobInsertStats {
+                batches: $stats.insert.batches,
+                chunks: $stats.insert.chunks,
+                duration_ms: $stats.insert.duration_ms,
+                breakdown: JobInsertBreakdown {
+                    provider_insert_batch: infra_job_timing_stats!(
+                        $stats.insert.breakdown.provider_insert_batch
+                    ),
+                    await_insert_task: infra_job_timing_stats!(
+                        $stats.insert.breakdown.await_insert_task
+                    ),
+                },
+            },
+        }
+    };
+}
+
 impl From<semantic_code_infra::JobResult> for JobResult {
     fn from(value: semantic_code_infra::JobResult) -> Self {
         match value {
@@ -1080,31 +1395,14 @@ impl From<semantic_code_infra::JobResult> for JobResult {
                 total_chunks,
                 index_status,
                 stage_stats,
-            } => Self::Index {
-                indexed_files,
-                total_chunks,
-                index_status,
-                stage_stats: JobStageStats {
-                    scan: JobScanStats {
-                        files: stage_stats.scan.files,
-                        duration_ms: stage_stats.scan.duration_ms,
-                    },
-                    split: JobSplitStats {
-                        files: stage_stats.split.files,
-                        chunks: stage_stats.split.chunks,
-                        duration_ms: stage_stats.split.duration_ms,
-                    },
-                    embed: JobEmbedStats {
-                        batches: stage_stats.embed.batches,
-                        chunks: stage_stats.embed.chunks,
-                        duration_ms: stage_stats.embed.duration_ms,
-                    },
-                    insert: JobInsertStats {
-                        batches: stage_stats.insert.batches,
-                        chunks: stage_stats.insert.chunks,
-                        duration_ms: stage_stats.insert.duration_ms,
-                    },
-                },
+            } => {
+                let stage_stats = *stage_stats;
+                Self::Index {
+                    indexed_files,
+                    total_chunks,
+                    index_status,
+                    stage_stats: Box::new(facade_job_stage_stats!(stage_stats)),
+                }
             },
             semantic_code_infra::JobResult::Reindex {
                 added,

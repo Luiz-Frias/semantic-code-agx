@@ -16,6 +16,10 @@ CXX = "g++"
 # uv reads Python version from .python-version or pyproject.toml [project.requires-python]
 _.python.venv = { path = ".venv", create = true }
 
+# Expose the repo-local release-with-debug CLI build on PATH so `sca`
+# resolves to the workspace binary after it has been built.
+_.path = ["./target/release-with-debug"]
+
 # Rust compilation settings (migrated from .envrc)
 RUST_BACKTRACE = "1"
 CARGO_TERM_COLOR = "always"
@@ -31,8 +35,8 @@ CLIPPY_FLAGS_TEST = "-D warnings -D clippy::allow_attributes_without_reason -W c
 # sccache - caches compilation across branches (huge speedup)
 RUSTC_WRAPPER = "sccache"
 
-# Load secrets from .env (API keys, etc.)
-_.file = ".env"
+# Load secrets from .env if present (API keys for remote embedding providers)
+_.file = [".env", { path = ".env.local", required = false }]
 
 # Auto-start sccache when entering this directory.
 # No-op if already running (~0ms). Ensures RUSTC_WRAPPER=sccache always works.
@@ -44,6 +48,8 @@ run = "sccache --start-server 2>/dev/null || true"
 uv_venv_auto = true
 
 [tools]
+# Python 3.12 (pinned; uv uses this for .venv creation)
+python = "3.12"
 # Rust nightly (edition 2024)
 rust = "nightly-2026-03-01"
 just = "latest"
@@ -71,7 +77,7 @@ yamllint = "latest"   # YAML linter
 actionlint = "latest" # GitHub Actions workflow linter
 # Profiling & debugging (project-scoped; LLDB requires Homebrew: `brew install llvm`)
 "cargo:samply" = "latest"     # CPU profiler (wraps perf/dtrace)
-"cargo:ferroscope" = "latest" # MCP debugger server (LLDB backend)
+# "cargo:ferroscope" = "latest" # MCP debugger server (optional, internal)
 
 [tasks.check]
 description = "Run quality checks (fmt + clippy + test-unit)"

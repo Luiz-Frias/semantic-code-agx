@@ -331,9 +331,27 @@ pub fn open_search_session(
     overrides_json: Option<&str>,
     codebase_root: &Path,
 ) -> Result<SearchSession, InfraError> {
-    semantic_code_infra::open_search_session(config_path, overrides_json, codebase_root)
-        .map(SearchSession)
-        .map_err(Into::into)
+    open_search_session_with_options(config_path, overrides_json, codebase_root, false)
+}
+
+/// Open a warm search session with optional deferred embedding initialization.
+///
+/// When `query_vectors_only` is `true`, the session skips embedding provider
+/// initialization and requires callers to use pre-computed query vectors.
+pub fn open_search_session_with_options(
+    config_path: Option<&Path>,
+    overrides_json: Option<&str>,
+    codebase_root: &Path,
+    query_vectors_only: bool,
+) -> Result<SearchSession, InfraError> {
+    semantic_code_infra::open_search_session_with_options(
+        config_path,
+        overrides_json,
+        codebase_root,
+        query_vectors_only,
+    )
+    .map(SearchSession)
+    .map_err(Into::into)
 }
 
 /// Clear the local index and snapshot.

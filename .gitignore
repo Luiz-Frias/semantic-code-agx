@@ -219,9 +219,11 @@ volumes.*/
 
 # Local vector index data (.context/ is the project-local index)
 .context/
+artifacts/
 
 # Codex transient sub-agent worktrees
 .claude/worktrees/
+.codex/worktrees/
 
 # CI monitoring state (cached between runs)
 .ci-monitor-state/
@@ -234,10 +236,8 @@ logs/
 .benchmarks/
 criterion/
 
-# Benchmark data — raw JSONs tracked by DVC, derived outputs gitignored
-benchmarks/data/scaling/*.tsv
-benchmarks/data/scaling/*.md
-benchmarks/data/scaling/charts/
+# Scripts
+scripts/legacy
 
 # Test artifacts
 .tmp/

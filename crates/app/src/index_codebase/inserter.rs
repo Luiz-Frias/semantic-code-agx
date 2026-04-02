@@ -61,6 +61,7 @@ impl InsertBatchTask {
                     .await
             },
         };
+        stats.record_provider_insert_batch(insert_started.elapsed());
 
         if let Some(timer) = timer.as_ref() {
             timer.stop();
@@ -149,6 +150,7 @@ pub(super) async fn drain_one_insert_batch<'a>(
         return Ok(());
     };
 
+    let wait_started = Instant::now();
     if let Err(error) = promise.await {
         if error.is_cancelled() {
             return Err(error);
@@ -170,6 +172,7 @@ pub(super) async fn drain_one_insert_batch<'a>(
             state.next_insert_to_await,
         ));
     }
+    ctx.stats.record_await_insert_task(wait_started.elapsed());
 
     Ok(())
 }

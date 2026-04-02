@@ -255,6 +255,12 @@ pub struct VectorDocumentMetadata {
     pub file_extension: Option<Box<str>>,
     /// Line span for the chunk.
     pub span: LineSpan,
+    /// Optional byte offset of this fragment within the original line-span content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment_start_byte: Option<u32>,
+    /// Optional exclusive byte offset of this fragment within the original line-span content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment_end_byte: Option<u32>,
     /// Optional structural hint (e.g. AST node kind).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_kind: Option<Box<str>>,
@@ -276,6 +282,8 @@ impl From<&ChunkMetadata> for VectorDocumentMetadata {
             language: metadata.language,
             file_extension: metadata.file_extension.clone(),
             span: metadata.span,
+            fragment_start_byte: None,
+            fragment_end_byte: None,
             node_kind: metadata.node_kind.clone(),
         }
     }

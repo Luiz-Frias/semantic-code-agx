@@ -92,6 +92,8 @@ const VECTOR_DB_INDEX_PARAMS_MAX: usize = 128;
 
 const SYNC_MAX_FILES_MIN: u32 = 1;
 const SYNC_MAX_FILES_MAX: u32 = 10_000_000;
+const SYNC_MAX_CHUNKS_MIN: u32 = 1;
+const SYNC_MAX_CHUNKS_MAX: u32 = 10_000_000;
 const SYNC_MAX_FILE_SIZE_MIN_BYTES: u64 = 1;
 const SYNC_MAX_FILE_SIZE_MAX_BYTES: u64 = 100_000_000;
 
@@ -209,6 +211,8 @@ pub struct ConfigLimits {
     pub vector_db_batch_size: BoundedU32<VECTOR_DB_BATCH_SIZE_MIN, VECTOR_DB_BATCH_SIZE_MAX>,
     /// Sync max files.
     pub sync_max_files: BoundedU32<SYNC_MAX_FILES_MIN, SYNC_MAX_FILES_MAX>,
+    /// Optional sync max chunks.
+    pub sync_max_chunks: Option<BoundedU32<SYNC_MAX_CHUNKS_MIN, SYNC_MAX_CHUNKS_MAX>>,
     /// Sync max file size (bytes).
     pub sync_max_file_size_bytes:
         BoundedU64<SYNC_MAX_FILE_SIZE_MIN_BYTES, SYNC_MAX_FILE_SIZE_MAX_BYTES>,
@@ -272,6 +276,13 @@ impl ConfigLimits {
                 config.sync.max_files,
                 SYNC_MAX_FILES_MIN,
                 SYNC_MAX_FILES_MAX,
+            )?,
+            sync_max_chunks: bounded_opt_u32(
+                "sync",
+                "maxChunks",
+                config.sync.max_chunks,
+                SYNC_MAX_CHUNKS_MIN,
+                SYNC_MAX_CHUNKS_MAX,
             )?,
             sync_max_file_size_bytes: bounded_u64(
                 "sync",
@@ -1013,6 +1024,17 @@ impl PartialEq for DfrrBq1Threshold {
 
 impl Eq for DfrrBq1Threshold {}
 
+/// Controls how `bq1Threshold` is interpreted by the DFRR kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DfrrBq1ThresholdMode {
+    /// Threshold is a fraction of dimension (default behaviour).
+    #[default]
+    RawDistance,
+    /// Threshold is a percentile of the per-query Hamming CDF.
+    ClusterPercentile,
+}
+
 /// HNSW kernel search tuning parameters.
 ///
 /// Controls the search-time behavior of the built-in HNSW kernel.
@@ -1097,6 +1119,19 @@ pub struct DfrrSearchConfig {
     /// Optional BQ1 Hamming threshold ratio in `[0.0, 1.0]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bq1_threshold: Option<DfrrBq1Threshold>,
+    /// How `bq1Threshold` is interpreted (default: `raw_distance`).
+    #[serde(default)]
+    pub bq1_threshold_mode: DfrrBq1ThresholdMode,
+    /// Number of samples used for percentile-assisted BQ1 admission.
+    ///
+    /// - `None` (default): auto — the kernel uses 16 samples when BQ1 is active.
+    /// - `Some(0)`: explicitly disabled.
+    /// - `Some(n)`: explicit sample count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bq1_percentile_assist_sample_count: Option<usize>,
+    /// Target percentile-rank threshold for BQ1 admission assistance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bq1_percentile_assist_target_rank: Option<DfrrBq1Threshold>,
     /// Automatically run BQ1 calibration after indexing completes (default: false).
     ///
     /// When `true` and no `.context/calibration.json` exists, `sca index`
@@ -1123,6 +1158,9 @@ impl Default for DfrrSearchConfig {
             query_probe_count: default_dfrr_query_probe_count(),
             query_min_cluster_size: default_dfrr_query_min_cluster_size(),
             bq1_threshold: None,
+            bq1_threshold_mode: DfrrBq1ThresholdMode::default(),
+            bq1_percentile_assist_sample_count: None,
+            bq1_percentile_assist_target_rank: None,
             auto_calibrate: false,
         }
     }
@@ -1253,6 +1291,15 @@ pub struct VectorDbConfig {
     /// DFRR kernel search tuning (only used when `vectorKernel = "dfrr"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dfrr_search: Option<DfrrSearchConfig>,
+    /// Internal build-time DFRR prewarm variants.
+    ///
+    /// This is intentionally separate from the public query-time `dfrrSearch`
+    /// selection. It allows higher-level orchestrators such as benchmark
+    /// runners to request that `sca index` prewarm one or more DFRR ready-state
+    /// variants as part of the publish FSM without surfacing a separate
+    /// user-facing warm command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dfrr_prewarm_searches: Vec<DfrrSearchConfig>,
 }
 
 impl Default for VectorDbConfig {
@@ -1281,6 +1328,7 @@ impl Default for VectorDbConfig {
             enable_search_metrics: false,
             hnsw_search: None,
             dfrr_search: None,
+            dfrr_prewarm_searches: Vec::new(),
         }
     }
 }
@@ -1443,6 +1491,8 @@ pub struct SyncConfig {
     pub ignore_patterns: Vec<Box<str>>,
     /// Maximum number of files considered during a scan.
     pub max_files: u32,
+    /// Optional maximum number of chunks considered during a scan.
+    pub max_chunks: Option<u32>,
     /// Maximum file size (bytes) for reading contents.
     pub max_file_size_bytes: u64,
 }
@@ -1453,6 +1503,7 @@ impl Default for SyncConfig {
             allowed_extensions: default_allowed_extensions(),
             ignore_patterns: default_ignore_patterns(),
             max_files: 250_000,
+            max_chunks: None,
             max_file_size_bytes: 2_000_000,
         }
     }
@@ -1488,6 +1539,15 @@ impl SyncConfig {
             SYNC_MAX_FILES_MIN,
             SYNC_MAX_FILES_MAX,
         )?;
+        if let Some(max_chunks) = self.max_chunks {
+            validate_limit_u32(
+                "sync",
+                "maxChunks",
+                max_chunks,
+                SYNC_MAX_CHUNKS_MIN,
+                SYNC_MAX_CHUNKS_MAX,
+            )?;
+        }
         validate_limit_u64(
             "sync",
             "maxFileSizeBytes",
@@ -2412,7 +2472,9 @@ mod tests {
                     "queryStrategy": "nearest-centroid-multi-probe",
                     "queryProbeCount": 7,
                     "queryMinClusterSize": 21,
-                    "bq1Threshold": 0.30
+                    "bq1Threshold": 0.30,
+                    "bq1PercentileAssistSampleCount": 16,
+                    "bq1PercentileAssistTargetRank": 0.25
                 }
             }
         });
@@ -2439,6 +2501,11 @@ mod tests {
         assert_eq!(dfrr.query_probe_count, 7);
         assert_eq!(dfrr.query_min_cluster_size, 21);
         assert_eq!(dfrr.bq1_threshold, Some(DfrrBq1Threshold::new(0.30)));
+        assert_eq!(dfrr.bq1_percentile_assist_sample_count, Some(16));
+        assert_eq!(
+            dfrr.bq1_percentile_assist_target_rank,
+            Some(DfrrBq1Threshold::new(0.25))
+        );
 
         // Round-trip: serialize back and verify
         let serialized = serde_json::to_value(&config.vector_db)?;
@@ -2462,11 +2529,19 @@ mod tests {
         );
         assert_eq!(dfrr_block["queryProbeCount"], 7);
         assert_eq!(dfrr_block["queryMinClusterSize"], 21);
+        assert_eq!(dfrr_block["bq1PercentileAssistSampleCount"], 16);
         let bq1_threshold = dfrr_block
             .get("bq1Threshold")
             .and_then(serde_json::Value::as_f64)
             .ok_or_else(|| std::io::Error::other("bq1Threshold missing or not numeric"))?;
         assert!((bq1_threshold - 0.30).abs() < 1e-6);
+        let bq1_percentile_assist_target_rank = dfrr_block
+            .get("bq1PercentileAssistTargetRank")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| {
+                std::io::Error::other("bq1PercentileAssistTargetRank missing or not numeric")
+            })?;
+        assert!((bq1_percentile_assist_target_rank - 0.25).abs() < 1e-6);
         Ok(())
     }
 
@@ -2505,6 +2580,8 @@ mod tests {
         assert_eq!(dfrr.query_probe_count, 3);
         assert_eq!(dfrr.query_min_cluster_size, 64);
         assert_eq!(dfrr.bq1_threshold, None);
+        assert_eq!(dfrr.bq1_percentile_assist_sample_count, None);
+        assert_eq!(dfrr.bq1_percentile_assist_target_rank, None);
         Ok(())
     }
 
@@ -2545,6 +2622,8 @@ mod tests {
         assert_eq!(dfrr.query_probe_count, 2);
         assert_eq!(dfrr.query_min_cluster_size, 5);
         assert_eq!(dfrr.bq1_threshold, None);
+        assert_eq!(dfrr.bq1_percentile_assist_sample_count, None);
+        assert_eq!(dfrr.bq1_percentile_assist_target_rank, None);
         assert_eq!(
             config.vector_db.effective_vector_kernel(),
             VectorKernelKind::Dfrr
@@ -2558,6 +2637,47 @@ mod tests {
         let serialized = serde_json::to_value(&config)?;
         // dfrrSearch should be absent (skip_serializing_if = "Option::is_none")
         assert!(serialized.get("dfrrSearch").is_none());
+        assert!(serialized.get("dfrrPrewarmSearches").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn dfrr_prewarm_searches_round_trip() -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "version": 1,
+            "vectorDb": {
+                "dfrrPrewarmSearches": [
+                    {
+                        "efSearch": 64,
+                        "pivotCount": 8,
+                        "clusterCount": 8,
+                        "queryStrategy": "static"
+                    },
+                    {
+                        "efSearch": 96,
+                        "pivotCount": 4,
+                        "clusterCount": 12,
+                        "queryStrategy": "nearest-centroid-multi-probe",
+                        "queryProbeCount": 5,
+                        "queryMinClusterSize": 32
+                    }
+                ]
+            }
+        });
+        let config = parse_backend_config_json(&payload.to_string())?;
+        assert_eq!(config.vector_db.dfrr_prewarm_searches.len(), 2);
+        assert_eq!(config.vector_db.dfrr_prewarm_searches[0].ef_search, 64);
+        assert_eq!(
+            config.vector_db.dfrr_prewarm_searches[1].query_strategy,
+            DfrrQueryStrategy::NearestCentroidMultiProbe
+        );
+
+        let serialized = serde_json::to_value(&config.vector_db)?;
+        let prewarm = serialized
+            .get("dfrrPrewarmSearches")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| std::io::Error::other("dfrrPrewarmSearches missing"))?;
+        assert_eq!(prewarm.len(), 2);
         Ok(())
     }
 }

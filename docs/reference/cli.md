@@ -1,144 +1,239 @@
 # CLI Reference
 
-The CLI provides local entrypoints for init, storage estimation, indexing,
-search, calibration, snapshot utilities, reindex, clear, status, config
-inspection, jobs, and build info. The developer-only `self-check` command is
-available in debug builds (or when built with the `dev-tools` feature).
-
-Phase 06 adds local vector kernel override flags on selected commands and
-kernel metadata in v2 snapshot flows (see internals docs below).
+Complete reference for the `sca` command-line interface.
 
 Primary command: `sca` (alias: `semantic-code`).
 
-For end-to-end local flows, see `docs/reference/cli-usage.md`.
+## Commands
 
-## Usage
+### init
+
+Create `.context/manifest.json` and `.context/config.toml` for a new codebase.
 
 ```bash
-sca --version
-sca init
-sca estimate-storage
-sca index --init
-sca index --init --background
-sca index --vector-kernel hnsw-rs
-sca search --query "local-index"
-sca search --stdin-batch --output ndjson
-sca search --query "local-index" --vector-kernel hnsw-rs
-sca calibrate --target-recall 0.99 --vector-kernel dfrr
-sca snapshot-subset --source .context/snapshots/current --dest /tmp/subset --target-count 1000
-sca reindex
-sca reindex --vector-kernel hnsw-rs
-sca reindex --background
-sca clear
-sca status
-sca jobs status <job-id>
-sca jobs cancel <job-id>
-sca config show
-sca config validate
+sca init [--config <path>] [--codebase-root <path>] \
+  [--storage-mode disabled|project|custom:/abs/path] [--force]
+```
+
+### estimate-storage
+
+Preview index storage requirements and free-space headroom.
+
+```bash
+sca estimate-storage [--config <path>] [--codebase-root <path>]
+```
+
+Embedding and vector DB overrides match `index`.
+
+### index
+
+Build the vector index from source files.
+
+```bash
+sca index [--config <path>] [--codebase-root <path>] [--init] [--background]
+```
+
+Embedding overrides (optional):
+
+- `--embedding-provider <id>`
+- `--embedding-model <id>`
+- `--embedding-base-url <url>`
+- `--embedding-dimension <n>`
+- `--embedding-local-first <true|false>`
+- `--embedding-local-only <true|false>`
+- `--embedding-routing-mode <localFirst|remoteFirst|split>`
+- `--embedding-split-remote-batches <n>`
+
+Vector DB overrides (optional):
+
+- `--vector-db-provider <id>`
+- `--vector-kernel <hnsw-rs|dfrr|flat-scan>`
+- `--vector-db-address <host:port>`
+- `--vector-db-base-url <url>`
+- `--vector-db-database <name>`
+- `--vector-db-ssl <true|false>`
+- `--vector-db-token <token>`
+- `--vector-db-username <name>`
+- `--vector-db-password <password>`
+
+### search
+
+Perform semantic search against the index.
+
+```bash
+sca search --query <text> [--top-k <n>] [--threshold <f>] \
+  [--filter-expr <expr>] [--include-content] [--config <path>] [--codebase-root <path>]
+sca search --stdin [--top-k <n>] [--threshold <f>] \
+  [--filter-expr <expr>] [--include-content] [--config <path>] [--codebase-root <path>]
+sca search --stdin-batch [--config <path>] [--codebase-root <path>]
+```
+
+Input modes:
+
+- `--query <text>`: inline query string
+- `--stdin`: read single query from stdin
+- `--stdin-batch`: read NDJSON queries from stdin, emit one NDJSON result per line (loads index once)
+
+```bash
+sca search --query "error handling"
+echo "error handling" | sca search --stdin --output ndjson
+printf '%s\n' '{"query":"error handling","topK":10}' | sca search --stdin-batch --output ndjson
+```
+
+Vector DB overrides: same as `index`.
+
+### calibrate
+
+Find a BQ1 threshold for the local DFRR kernel.
+
+```bash
+sca calibrate [--config <path>] [--codebase-root <path>] \
+  [--target-recall <f>] [--precision <f>] [--num-queries <n>] [--top-k <n>]
+```
+
+Vector DB overrides: same as `index`.
+
+### reindex
+
+Incrementally update the index based on file changes (Merkle diff).
+
+```bash
+sca reindex [--config <path>] [--codebase-root <path>] [--background]
+```
+
+Embedding and vector DB overrides match `index`.
+
+### clear
+
+Remove all indexed data.
+
+```bash
+sca clear [--config <path>] [--codebase-root <path>]
+```
+
+### status
+
+Show index metadata and health.
+
+```bash
+sca status [--config <path>] [--codebase-root <path>]
+```
+
+### config
+
+Inspect and validate configuration.
+
+```bash
+sca config check [--path <path>] [--overrides-json <json>]
+sca config show [--path <path>] [--overrides-json <json>]
+sca config validate [--path <path>] [--overrides-json <json>]
+```
+
+### jobs
+
+Manage background jobs started with `--background`.
+
+```bash
+sca jobs status <job-id> [--codebase-root <path>]
+sca jobs cancel <job-id> [--codebase-root <path>]
+```
+
+### info
+
+Display build metadata (version, git hash, target triple, profile).
+
+```bash
 sca info
 ```
 
-`self-check` is developer-only:
+### self-check (developer-only)
+
+Available in debug builds or with the `dev-tools` feature.
 
 ```bash
 sca self-check
 sca self-check --output json
 ```
 
-## Kernel selection flags
+Reports: status blocks, build metadata, kernel metadata.
 
-`--vector-kernel` is currently accepted on:
+## Global Flags
 
-- `estimate-storage`
-- `index`
-- `search`
-- `calibrate`
-- `reindex`
+| Flag | Description |
+|---|---|
+| `--output <text\|json\|ndjson>` | Select output format |
+| `--agent` | Machine-friendly defaults (NDJSON output, no prompts, no progress) |
+| `--no-progress` | Suppress progress/logs on stderr |
+| `--interactive` | Enable prompts (no prompts are used yet) |
+| `--json` | Legacy alias for `--output json` |
+
+## Kernel Selection
+
+`--vector-kernel` is accepted on `estimate-storage`, `index`, `search`, `calibrate`, and `reindex`.
 
 Accepted values:
 
-- `hnsw-rs`
-- `dfrr`
-- `flat-scan`
+- `hnsw-rs` -- default local HNSW kernel
+- `dfrr` -- experimental DFRR kernel (requires feature flag)
+- `flat-scan` -- exact search for benchmarking and ground truth
 
-Behavior notes:
+Requesting `dfrr` without build support returns `vector:kernel_unsupported`. `clear` and `status` do not currently accept `--vector-kernel`.
 
-- Effective kernel still passes through config validation and adapter/build
-  support checks.
-- `flat-scan` is intended for exact local runs and benchmark ground-truth
-  comparisons.
-- Requesting `dfrr` on a build without DFRR support returns
-  `vector:kernel_unsupported`.
-- `clear` and `status` do not currently expose `--vector-kernel`.
+## Output Routing
 
-## Output routing
+- Machine-readable output (`--output json|ndjson`) writes to stdout.
+- Logs and diagnostics write to stderr.
+- `--agent` forces NDJSON and suppresses progress.
 
-- Machine-readable output uses `--output json|ndjson` and is written to stdout.
-- Logs and diagnostics are written to stderr.
-- `--agent` forces NDJSON output and suppresses progress output.
-- `--json` remains supported as a legacy alias for `--output json`.
+## Agent and Automation Usage
 
-## Search input
-
-`search` accepts `--query`, `--stdin`, or `--stdin-batch`:
+For CI, scripts, and AI agent workflows:
 
 ```bash
-sca search --query "error handling"
-echo "error handling" | sca search --stdin --output ndjson
+sca --agent search --query "auth flow"
+sca --agent --output ndjson search --stdin
+sca --output ndjson search --query "error handling" \
+  | jq -r 'select(.type=="result") | .relativePath'
 ```
 
-`--stdin-batch` reads NDJSON queries from stdin and writes one NDJSON result per
-line after loading the local index once:
+### Exit Codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Internal error |
+| `2` | Invalid input or validation failure |
+| `3` | I/O failure |
+
+## Common Workflows
+
+### First-time setup
 
 ```bash
-printf '%s\n' '{"query":"error handling","topK":10}' | sca search --stdin-batch --output ndjson
+sca init
+sca index --init
+sca search --query "error handling and recovery"
 ```
 
-## Background jobs
-
-Use `--background` on `index` or `reindex` to run asynchronously. The command
-returns a job id; use `sca jobs status` to poll or `sca jobs cancel` to request
-cancellation.
-
-## Self-check output metadata
-
-`self-check --output json` reports:
-
-- top-level status blocks: `status`, `env`, `index`, `search`, `clear`
-- build metadata block: `build.name`, `build.version`, `build.facadeVersion`,
-  `build.rustcVersion`, `build.target`, `build.profile`, `build.gitHash`,
-  `build.gitDirty`
-- kernel metadata block: `vectorKernel.effective`
-
-## Storage preflight
-
-Use `estimate-storage` to preview index storage requirements and free-space
-headroom based on your current config and codebase:
+### Daily development
 
 ```bash
-sca estimate-storage
-sca --output json estimate-storage
+sca reindex
+sca search --query "auth middleware"
 ```
 
-## Calibration
-
-Use `calibrate` to find a BQ1 threshold for the local DFRR kernel:
+### Background indexing
 
 ```bash
-sca calibrate --vector-kernel dfrr --target-recall 0.99 --num-queries 50
+sca index --background
+sca jobs status <job-id>
+sca jobs cancel <job-id>
 ```
 
-## Snapshot subset
-
-Use `snapshot-subset` to sample or perturb a v2 snapshot for benchmarking and
-reproducible smaller fixtures:
+### Machine-readable output
 
 ```bash
-sca snapshot-subset --source .context/snapshots/current --dest /tmp/subset --target-count 5000
+sca --output json search --query "embedding"
+sca --output ndjson search --query "embedding"
+sca --agent search --query "embedding"
 ```
-
-## Related references
-
-- `docs/reference/cli-commands.md`
-- `docs/reference/cli-usage.md`
-- `docs/reference/agent-usage.md`

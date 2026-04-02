@@ -43,6 +43,15 @@ impl IndexProgress {
     }
 }
 
+/// Prepare stage stats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareStageStats {
+    /// Elapsed time in milliseconds.
+    pub duration_ms: u64,
+    /// Function-level rollups inside the prepare stage.
+    pub breakdown: PrepareFunctionStats,
+}
+
 /// Scan stage stats.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanStageStats {
@@ -50,6 +59,41 @@ pub struct ScanStageStats {
     pub files: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level rollups inside the scan stage.
+    pub breakdown: ScanFunctionStats,
+}
+
+/// Reusable function-level timing aggregate.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FunctionTimingStats {
+    /// Number of calls recorded for this function.
+    pub calls: u64,
+    /// Cumulative elapsed time in milliseconds.
+    pub duration_ms: u64,
+}
+
+/// Function-level prepare breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrepareFunctionStats {
+    /// Time spent checking whether the collection already exists.
+    pub has_collection: FunctionTimingStats,
+    /// Time spent dropping the collection for force reindex.
+    pub drop_collection: FunctionTimingStats,
+    /// Time spent detecting the embedding dimension.
+    pub detect_dimension: FunctionTimingStats,
+    /// Time spent creating the collection.
+    pub create_collection: FunctionTimingStats,
+}
+
+/// Function-level scan breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScanFunctionStats {
+    /// Time spent loading ignore patterns.
+    pub load_ignore_patterns: FunctionTimingStats,
+    /// Time spent traversing the filesystem.
+    pub scan_code_files: FunctionTimingStats,
+    /// Time spent filtering the discovered file list.
+    pub filter_files: FunctionTimingStats,
 }
 
 /// Split stage stats.
@@ -61,6 +105,21 @@ pub struct SplitStageStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level rollups inside the split stage.
+    pub breakdown: SplitFunctionStats,
+}
+
+/// Function-level split breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SplitFunctionStats {
+    /// Time spent checking file size / type before reading.
+    pub file_passes_size_check: FunctionTimingStats,
+    /// Time spent reading file text.
+    pub read_file_text_or_skip: FunctionTimingStats,
+    /// Time spent inside the splitter adapter.
+    pub split_file_or_skip: FunctionTimingStats,
+    /// Time spent awaiting completed file tasks from the orchestration loop.
+    pub await_file_task: FunctionTimingStats,
 }
 
 /// Embedding stage stats.
@@ -72,6 +131,21 @@ pub struct EmbedStageStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level rollups inside the embed stage.
+    pub breakdown: EmbedFunctionStats,
+}
+
+/// Function-level embedding breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EmbedFunctionStats {
+    /// Time spent waiting in the queue before `embed_batch` starts running.
+    pub queue_latency: FunctionTimingStats,
+    /// Time spent inside the embedding provider batch call.
+    pub provider_embed_batch: FunctionTimingStats,
+    /// Time spent materializing vector documents after embedding.
+    pub build_insert_documents: FunctionTimingStats,
+    /// Time spent awaiting completion of queued embedding tasks.
+    pub await_embedding_task: FunctionTimingStats,
 }
 
 /// Insert stage stats.
@@ -83,11 +157,24 @@ pub struct InsertStageStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level rollups inside the insert stage.
+    pub breakdown: InsertFunctionStats,
+}
+
+/// Function-level insert breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InsertFunctionStats {
+    /// Time spent inside the vectordb insert call.
+    pub provider_insert_batch: FunctionTimingStats,
+    /// Time spent awaiting completion of queued insert tasks.
+    pub await_insert_task: FunctionTimingStats,
 }
 
 /// Aggregated ingestion stage stats.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexStageStats {
+    /// Prepare stage stats.
+    pub prepare: PrepareStageStats,
     /// Scan stage stats.
     pub scan: ScanStageStats,
     /// Split stage stats.
@@ -309,34 +396,137 @@ impl ProgressTracker {
 
 #[derive(Debug)]
 pub(super) struct IndexStageStatsCollector {
+    prepare_duration_ms: AtomicU64,
+    prepare_has_collection_calls: AtomicU64,
+    prepare_has_collection_duration_ms: AtomicU64,
+    prepare_drop_collection_calls: AtomicU64,
+    prepare_drop_collection_duration_ms: AtomicU64,
+    prepare_detect_dimension_calls: AtomicU64,
+    prepare_detect_dimension_duration_ms: AtomicU64,
+    prepare_create_collection_calls: AtomicU64,
+    prepare_create_collection_duration_ms: AtomicU64,
     scan_files: AtomicU64,
     scan_duration_ms: AtomicU64,
+    scan_load_ignore_patterns_calls: AtomicU64,
+    scan_load_ignore_patterns_duration_ms: AtomicU64,
+    scan_scan_code_files_calls: AtomicU64,
+    scan_scan_code_files_duration_ms: AtomicU64,
+    scan_filter_files_calls: AtomicU64,
+    scan_filter_files_duration_ms: AtomicU64,
     split_files: AtomicU64,
     split_chunks: AtomicU64,
     split_duration_ms: AtomicU64,
+    split_file_passes_size_check_calls: AtomicU64,
+    split_file_passes_size_check_duration_ms: AtomicU64,
+    split_read_file_text_or_skip_calls: AtomicU64,
+    split_read_file_text_or_skip_duration_ms: AtomicU64,
+    split_split_file_or_skip_calls: AtomicU64,
+    split_split_file_or_skip_duration_ms: AtomicU64,
+    split_await_file_task_calls: AtomicU64,
+    split_await_file_task_duration_ms: AtomicU64,
     embed_batches: AtomicU64,
     embed_chunks: AtomicU64,
     embed_duration_ms: AtomicU64,
+    embed_queue_latency_calls: AtomicU64,
+    embed_queue_latency_duration_ms: AtomicU64,
+    embed_provider_embed_batch_calls: AtomicU64,
+    embed_provider_embed_batch_duration_ms: AtomicU64,
+    embed_build_insert_documents_calls: AtomicU64,
+    embed_build_insert_documents_duration_ms: AtomicU64,
+    embed_await_embedding_task_calls: AtomicU64,
+    embed_await_embedding_task_duration_ms: AtomicU64,
     insert_batches: AtomicU64,
     insert_chunks: AtomicU64,
     insert_duration_ms: AtomicU64,
+    insert_provider_insert_batch_calls: AtomicU64,
+    insert_provider_insert_batch_duration_ms: AtomicU64,
+    insert_await_insert_task_calls: AtomicU64,
+    insert_await_insert_task_duration_ms: AtomicU64,
 }
 
 impl IndexStageStatsCollector {
     pub(super) const fn new() -> Self {
         Self {
+            prepare_duration_ms: AtomicU64::new(0),
+            prepare_has_collection_calls: AtomicU64::new(0),
+            prepare_has_collection_duration_ms: AtomicU64::new(0),
+            prepare_drop_collection_calls: AtomicU64::new(0),
+            prepare_drop_collection_duration_ms: AtomicU64::new(0),
+            prepare_detect_dimension_calls: AtomicU64::new(0),
+            prepare_detect_dimension_duration_ms: AtomicU64::new(0),
+            prepare_create_collection_calls: AtomicU64::new(0),
+            prepare_create_collection_duration_ms: AtomicU64::new(0),
             scan_files: AtomicU64::new(0),
             scan_duration_ms: AtomicU64::new(0),
+            scan_load_ignore_patterns_calls: AtomicU64::new(0),
+            scan_load_ignore_patterns_duration_ms: AtomicU64::new(0),
+            scan_scan_code_files_calls: AtomicU64::new(0),
+            scan_scan_code_files_duration_ms: AtomicU64::new(0),
+            scan_filter_files_calls: AtomicU64::new(0),
+            scan_filter_files_duration_ms: AtomicU64::new(0),
             split_files: AtomicU64::new(0),
             split_chunks: AtomicU64::new(0),
             split_duration_ms: AtomicU64::new(0),
+            split_file_passes_size_check_calls: AtomicU64::new(0),
+            split_file_passes_size_check_duration_ms: AtomicU64::new(0),
+            split_read_file_text_or_skip_calls: AtomicU64::new(0),
+            split_read_file_text_or_skip_duration_ms: AtomicU64::new(0),
+            split_split_file_or_skip_calls: AtomicU64::new(0),
+            split_split_file_or_skip_duration_ms: AtomicU64::new(0),
+            split_await_file_task_calls: AtomicU64::new(0),
+            split_await_file_task_duration_ms: AtomicU64::new(0),
             embed_batches: AtomicU64::new(0),
             embed_chunks: AtomicU64::new(0),
             embed_duration_ms: AtomicU64::new(0),
+            embed_queue_latency_calls: AtomicU64::new(0),
+            embed_queue_latency_duration_ms: AtomicU64::new(0),
+            embed_provider_embed_batch_calls: AtomicU64::new(0),
+            embed_provider_embed_batch_duration_ms: AtomicU64::new(0),
+            embed_build_insert_documents_calls: AtomicU64::new(0),
+            embed_build_insert_documents_duration_ms: AtomicU64::new(0),
+            embed_await_embedding_task_calls: AtomicU64::new(0),
+            embed_await_embedding_task_duration_ms: AtomicU64::new(0),
             insert_batches: AtomicU64::new(0),
             insert_chunks: AtomicU64::new(0),
             insert_duration_ms: AtomicU64::new(0),
+            insert_provider_insert_batch_calls: AtomicU64::new(0),
+            insert_provider_insert_batch_duration_ms: AtomicU64::new(0),
+            insert_await_insert_task_calls: AtomicU64::new(0),
+            insert_await_insert_task_duration_ms: AtomicU64::new(0),
         }
+    }
+
+    pub(super) fn record_prepare(&self, duration: Duration) {
+        self.prepare_duration_ms
+            .store(duration_ms(duration), Ordering::Release);
+    }
+
+    pub(super) fn record_prepare_has_collection(&self, duration: Duration) {
+        self.prepare_has_collection_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.prepare_has_collection_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_prepare_drop_collection(&self, duration: Duration) {
+        self.prepare_drop_collection_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.prepare_drop_collection_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_prepare_detect_dimension(&self, duration: Duration) {
+        self.prepare_detect_dimension_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.prepare_detect_dimension_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_prepare_create_collection(&self, duration: Duration) {
+        self.prepare_create_collection_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.prepare_create_collection_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
     }
 
     pub(super) fn record_scan(&self, files: u64, duration: Duration) {
@@ -345,10 +535,58 @@ impl IndexStageStatsCollector {
             .store(duration_ms(duration), Ordering::Release);
     }
 
+    pub(super) fn record_scan_load_ignore_patterns(&self, duration: Duration) {
+        self.scan_load_ignore_patterns_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.scan_load_ignore_patterns_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_scan_code_files(&self, duration: Duration) {
+        self.scan_scan_code_files_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.scan_scan_code_files_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_filter_files(&self, duration: Duration) {
+        self.scan_filter_files_calls.fetch_add(1, Ordering::AcqRel);
+        self.scan_filter_files_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
     pub(super) fn record_split(&self, files: u64, chunks: u64, duration: Duration) {
         self.split_files.fetch_add(files, Ordering::AcqRel);
         self.split_chunks.fetch_add(chunks, Ordering::AcqRel);
         self.split_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_split_file_passes_size_check(&self, duration: Duration) {
+        self.split_file_passes_size_check_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.split_file_passes_size_check_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_split_read_file_text_or_skip(&self, duration: Duration) {
+        self.split_read_file_text_or_skip_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.split_read_file_text_or_skip_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_split_file_or_skip(&self, duration: Duration) {
+        self.split_split_file_or_skip_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.split_split_file_or_skip_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_await_file_task(&self, duration: Duration) {
+        self.split_await_file_task_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.split_await_file_task_duration_ms
             .fetch_add(duration_ms(duration), Ordering::AcqRel);
     }
 
@@ -359,6 +597,34 @@ impl IndexStageStatsCollector {
             .fetch_add(duration_ms(duration), Ordering::AcqRel);
     }
 
+    pub(super) fn record_embed_queue_latency(&self, duration: Duration) {
+        self.embed_queue_latency_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.embed_queue_latency_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_provider_embed_batch(&self, duration: Duration) {
+        self.embed_provider_embed_batch_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.embed_provider_embed_batch_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_build_insert_documents(&self, duration: Duration) {
+        self.embed_build_insert_documents_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.embed_build_insert_documents_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_await_embedding_task(&self, duration: Duration) {
+        self.embed_await_embedding_task_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.embed_await_embedding_task_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
     pub(super) fn record_insert(&self, chunks: u64, duration: Duration) {
         self.insert_batches.fetch_add(1, Ordering::AcqRel);
         self.insert_chunks.fetch_add(chunks, Ordering::AcqRel);
@@ -366,27 +632,149 @@ impl IndexStageStatsCollector {
             .fetch_add(duration_ms(duration), Ordering::AcqRel);
     }
 
+    pub(super) fn record_provider_insert_batch(&self, duration: Duration) {
+        self.insert_provider_insert_batch_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.insert_provider_insert_batch_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    pub(super) fn record_await_insert_task(&self, duration: Duration) {
+        self.insert_await_insert_task_calls
+            .fetch_add(1, Ordering::AcqRel);
+        self.insert_await_insert_task_duration_ms
+            .fetch_add(duration_ms(duration), Ordering::AcqRel);
+    }
+
+    fn load_timing_stats(calls: &AtomicU64, duration_ms: &AtomicU64) -> FunctionTimingStats {
+        FunctionTimingStats {
+            calls: calls.load(Ordering::Acquire),
+            duration_ms: duration_ms.load(Ordering::Acquire),
+        }
+    }
+
+    fn prepare_snapshot(&self) -> PrepareStageStats {
+        PrepareStageStats {
+            duration_ms: self.prepare_duration_ms.load(Ordering::Acquire),
+            breakdown: PrepareFunctionStats {
+                has_collection: Self::load_timing_stats(
+                    &self.prepare_has_collection_calls,
+                    &self.prepare_has_collection_duration_ms,
+                ),
+                drop_collection: Self::load_timing_stats(
+                    &self.prepare_drop_collection_calls,
+                    &self.prepare_drop_collection_duration_ms,
+                ),
+                detect_dimension: Self::load_timing_stats(
+                    &self.prepare_detect_dimension_calls,
+                    &self.prepare_detect_dimension_duration_ms,
+                ),
+                create_collection: Self::load_timing_stats(
+                    &self.prepare_create_collection_calls,
+                    &self.prepare_create_collection_duration_ms,
+                ),
+            },
+        }
+    }
+
+    fn scan_snapshot(&self) -> ScanStageStats {
+        ScanStageStats {
+            files: self.scan_files.load(Ordering::Acquire),
+            duration_ms: self.scan_duration_ms.load(Ordering::Acquire),
+            breakdown: ScanFunctionStats {
+                load_ignore_patterns: Self::load_timing_stats(
+                    &self.scan_load_ignore_patterns_calls,
+                    &self.scan_load_ignore_patterns_duration_ms,
+                ),
+                scan_code_files: Self::load_timing_stats(
+                    &self.scan_scan_code_files_calls,
+                    &self.scan_scan_code_files_duration_ms,
+                ),
+                filter_files: Self::load_timing_stats(
+                    &self.scan_filter_files_calls,
+                    &self.scan_filter_files_duration_ms,
+                ),
+            },
+        }
+    }
+
+    fn split_snapshot(&self) -> SplitStageStats {
+        SplitStageStats {
+            files: self.split_files.load(Ordering::Acquire),
+            chunks: self.split_chunks.load(Ordering::Acquire),
+            duration_ms: self.split_duration_ms.load(Ordering::Acquire),
+            breakdown: SplitFunctionStats {
+                file_passes_size_check: Self::load_timing_stats(
+                    &self.split_file_passes_size_check_calls,
+                    &self.split_file_passes_size_check_duration_ms,
+                ),
+                read_file_text_or_skip: Self::load_timing_stats(
+                    &self.split_read_file_text_or_skip_calls,
+                    &self.split_read_file_text_or_skip_duration_ms,
+                ),
+                split_file_or_skip: Self::load_timing_stats(
+                    &self.split_split_file_or_skip_calls,
+                    &self.split_split_file_or_skip_duration_ms,
+                ),
+                await_file_task: Self::load_timing_stats(
+                    &self.split_await_file_task_calls,
+                    &self.split_await_file_task_duration_ms,
+                ),
+            },
+        }
+    }
+
+    fn embed_snapshot(&self) -> EmbedStageStats {
+        EmbedStageStats {
+            batches: self.embed_batches.load(Ordering::Acquire),
+            chunks: self.embed_chunks.load(Ordering::Acquire),
+            duration_ms: self.embed_duration_ms.load(Ordering::Acquire),
+            breakdown: EmbedFunctionStats {
+                queue_latency: Self::load_timing_stats(
+                    &self.embed_queue_latency_calls,
+                    &self.embed_queue_latency_duration_ms,
+                ),
+                provider_embed_batch: Self::load_timing_stats(
+                    &self.embed_provider_embed_batch_calls,
+                    &self.embed_provider_embed_batch_duration_ms,
+                ),
+                build_insert_documents: Self::load_timing_stats(
+                    &self.embed_build_insert_documents_calls,
+                    &self.embed_build_insert_documents_duration_ms,
+                ),
+                await_embedding_task: Self::load_timing_stats(
+                    &self.embed_await_embedding_task_calls,
+                    &self.embed_await_embedding_task_duration_ms,
+                ),
+            },
+        }
+    }
+
+    fn insert_snapshot(&self) -> InsertStageStats {
+        InsertStageStats {
+            batches: self.insert_batches.load(Ordering::Acquire),
+            chunks: self.insert_chunks.load(Ordering::Acquire),
+            duration_ms: self.insert_duration_ms.load(Ordering::Acquire),
+            breakdown: InsertFunctionStats {
+                provider_insert_batch: Self::load_timing_stats(
+                    &self.insert_provider_insert_batch_calls,
+                    &self.insert_provider_insert_batch_duration_ms,
+                ),
+                await_insert_task: Self::load_timing_stats(
+                    &self.insert_await_insert_task_calls,
+                    &self.insert_await_insert_task_duration_ms,
+                ),
+            },
+        }
+    }
+
     pub(super) fn snapshot(&self) -> IndexStageStats {
         IndexStageStats {
-            scan: ScanStageStats {
-                files: self.scan_files.load(Ordering::Acquire),
-                duration_ms: self.scan_duration_ms.load(Ordering::Acquire),
-            },
-            split: SplitStageStats {
-                files: self.split_files.load(Ordering::Acquire),
-                chunks: self.split_chunks.load(Ordering::Acquire),
-                duration_ms: self.split_duration_ms.load(Ordering::Acquire),
-            },
-            embed: EmbedStageStats {
-                batches: self.embed_batches.load(Ordering::Acquire),
-                chunks: self.embed_chunks.load(Ordering::Acquire),
-                duration_ms: self.embed_duration_ms.load(Ordering::Acquire),
-            },
-            insert: InsertStageStats {
-                batches: self.insert_batches.load(Ordering::Acquire),
-                chunks: self.insert_chunks.load(Ordering::Acquire),
-                duration_ms: self.insert_duration_ms.load(Ordering::Acquire),
-            },
+            prepare: self.prepare_snapshot(),
+            scan: self.scan_snapshot(),
+            split: self.split_snapshot(),
+            embed: self.embed_snapshot(),
+            insert: self.insert_snapshot(),
         }
     }
 }
@@ -484,6 +872,8 @@ impl BatchState<'_> {
 pub(super) struct PendingChunk {
     pub(super) relative_path: Box<str>,
     pub(super) span: LineSpan,
+    pub(super) fragment_start_byte: Option<u32>,
+    pub(super) fragment_end_byte: Option<u32>,
     pub(super) language: Language,
     pub(super) content: Chunk<MAX_CHUNK_CHARS>,
     pub(super) file_extension: Option<Box<str>>,

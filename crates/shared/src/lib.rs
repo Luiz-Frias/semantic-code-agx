@@ -37,8 +37,8 @@ mod validation;
 // These modules will be implemented in Phase 04: Ports and Use-cases
 
 pub use concurrency::{
-    BoundedQueue, BoundedQueueClosedError, CancellationToken, CorrelationId, RequestContext,
-    WorkerPool, WorkerPoolOptions,
+    BoundedQueue, BoundedQueueClosedError, CancellationDropGuard, CancellationToken, CorrelationId,
+    RequestContext, WorkerPool, WorkerPoolOptions,
 };
 pub use errors::{
     ErrorClass, ErrorCode, ErrorEnvelope, ErrorKind, ErrorMetadata, REDACTED_VALUE,

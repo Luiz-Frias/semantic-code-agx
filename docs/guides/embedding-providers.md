@@ -344,7 +344,7 @@ export OPENAI_API_KEY="sk-..."
 - Clear and re-index after changing providers
 - Each provider has different embedding dimensions
 
-See [Troubleshooting](../TROUBLESHOOTING.md) for more.
+See [Troubleshooting](../troubleshooting.md) for more.
 
 ---
 

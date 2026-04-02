@@ -6,8 +6,8 @@
 //! - safe (secret values are redacted in error metadata)
 
 use crate::schema::{
-    BackendConfig, EmbeddingCacheDiskProvider, EmbeddingRoutingMode, ValidatedBackendConfig,
-    VectorKernelKind, VectorSearchStrategy,
+    BackendConfig, DfrrBq1Threshold, DfrrSearchConfig, EmbeddingCacheDiskProvider,
+    EmbeddingRoutingMode, ValidatedBackendConfig, VectorKernelKind, VectorSearchStrategy,
 };
 use crate::storage::VectorSnapshotFormat;
 use semantic_code_domain::IndexMode;
@@ -206,6 +206,14 @@ pub const ENV_VECTOR_DB_USERNAME: &str = "SCA_VECTOR_DB_USERNAME";
 /// Env var: vector DB auth password (secret).
 // gitleaks:allow
 pub const ENV_VECTOR_DB_PASSWORD: &str = "SCA_VECTOR_DB_PASSWORD";
+/// Env var: DFRR BQ1 threshold ratio override.
+pub const ENV_VECTOR_DB_DFRR_BQ1_THRESHOLD: &str = "SCA_VECTOR_DB_DFRR_BQ1_THRESHOLD";
+/// Env var: DFRR BQ1 percentile-assist sample count override.
+pub const ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_SAMPLE_COUNT: &str =
+    "SCA_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_SAMPLE_COUNT";
+/// Env var: DFRR BQ1 percentile-assist target rank override.
+pub const ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_TARGET_RANK: &str =
+    "SCA_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_TARGET_RANK";
 
 /// Env var: sync allowed extensions as CSV.
 pub const ENV_SYNC_ALLOWED_EXTENSIONS: &str = "SCA_SYNC_ALLOWED_EXTENSIONS";
@@ -213,6 +221,8 @@ pub const ENV_SYNC_ALLOWED_EXTENSIONS: &str = "SCA_SYNC_ALLOWED_EXTENSIONS";
 pub const ENV_SYNC_IGNORE_PATTERNS: &str = "SCA_SYNC_IGNORE_PATTERNS";
 /// Env var: sync max files.
 pub const ENV_SYNC_MAX_FILES: &str = "SCA_SYNC_MAX_FILES";
+/// Env var: sync max chunks.
+pub const ENV_SYNC_MAX_CHUNKS: &str = "SCA_SYNC_MAX_CHUNKS";
 /// Env var: sync max file size in bytes.
 pub const ENV_SYNC_MAX_FILE_SIZE_BYTES: &str = "SCA_SYNC_MAX_FILE_SIZE_BYTES";
 
@@ -308,9 +318,13 @@ const STD_ENV_KEYS: &[&str] = &[
     ENV_VECTOR_DB_TOKEN,
     ENV_VECTOR_DB_USERNAME,
     ENV_VECTOR_DB_PASSWORD,
+    ENV_VECTOR_DB_DFRR_BQ1_THRESHOLD,
+    ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_SAMPLE_COUNT,
+    ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_TARGET_RANK,
     ENV_SYNC_ALLOWED_EXTENSIONS,
     ENV_SYNC_IGNORE_PATTERNS,
     ENV_SYNC_MAX_FILES,
+    ENV_SYNC_MAX_CHUNKS,
     ENV_SYNC_MAX_FILE_SIZE_BYTES,
 ];
 
@@ -459,6 +473,12 @@ pub struct BackendEnv {
     pub vector_db_username: Option<Box<str>>,
     /// Secret: vector DB password (not persisted in config).
     pub vector_db_password: Option<SecretString>,
+    /// Override for `vectorDb.dfrrSearch.bq1Threshold`.
+    pub vector_db_dfrr_bq1_threshold: Option<DfrrBq1Threshold>,
+    /// Override for `vectorDb.dfrrSearch.bq1PercentileAssistSampleCount`.
+    pub vector_db_dfrr_bq1_percentile_assist_sample_count: Option<usize>,
+    /// Override for `vectorDb.dfrrSearch.bq1PercentileAssistTargetRank`.
+    pub vector_db_dfrr_bq1_percentile_assist_target_rank: Option<DfrrBq1Threshold>,
 
     /// Override for `sync.allowedExtensions` (full replacement).
     pub sync_allowed_extensions: Option<Vec<Box<str>>>,
@@ -466,6 +486,8 @@ pub struct BackendEnv {
     pub sync_ignore_patterns: Option<Vec<Box<str>>>,
     /// Override for `sync.maxFiles`.
     pub sync_max_files: Option<u32>,
+    /// Override for `sync.maxChunks`.
+    pub sync_max_chunks: Option<u32>,
     /// Override for `sync.maxFileSizeBytes`.
     pub sync_max_file_size_bytes: Option<u64>,
 }
@@ -554,12 +576,16 @@ struct VectorDbEnvOverrides {
     token: Option<SecretString>,
     username: Option<Box<str>>,
     password: Option<SecretString>,
+    dfrr_bq1_threshold: Option<DfrrBq1Threshold>,
+    dfrr_bq1_percentile_assist_sample_count: Option<usize>,
+    dfrr_bq1_percentile_assist_target_rank: Option<DfrrBq1Threshold>,
 }
 
 struct SyncEnvOverrides {
     allowed_extensions: Option<Vec<Box<str>>>,
     ignore_patterns: Option<Vec<Box<str>>>,
     max_files: Option<u32>,
+    max_chunks: Option<u32>,
     max_file_size_bytes: Option<u64>,
 }
 
@@ -838,6 +864,18 @@ fn parse_vectordb_env(
         token: parse_optional_secret(map, ENV_VECTOR_DB_TOKEN)?,
         username: parse_optional_trimmed_string(map, ENV_VECTOR_DB_USERNAME)?,
         password: parse_optional_secret(map, ENV_VECTOR_DB_PASSWORD)?,
+        dfrr_bq1_threshold: parse_optional_dfrr_bq1_threshold(
+            map,
+            ENV_VECTOR_DB_DFRR_BQ1_THRESHOLD,
+        )?,
+        dfrr_bq1_percentile_assist_sample_count: parse_optional_usize(
+            map,
+            ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_SAMPLE_COUNT,
+        )?,
+        dfrr_bq1_percentile_assist_target_rank: parse_optional_dfrr_bq1_threshold(
+            map,
+            ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_TARGET_RANK,
+        )?,
     })
 }
 
@@ -846,6 +884,7 @@ fn parse_sync_env(map: &BTreeMap<String, String>) -> Result<SyncEnvOverrides, En
         allowed_extensions: parse_optional_csv_extensions(map, ENV_SYNC_ALLOWED_EXTENSIONS)?,
         ignore_patterns: parse_optional_csv_patterns(map, ENV_SYNC_IGNORE_PATTERNS)?,
         max_files: parse_optional_u32(map, ENV_SYNC_MAX_FILES)?,
+        max_chunks: parse_optional_u32(map, ENV_SYNC_MAX_CHUNKS)?,
         max_file_size_bytes: parse_optional_u64(map, ENV_SYNC_MAX_FILE_SIZE_BYTES)?,
     })
 }
@@ -930,9 +969,15 @@ impl BackendEnv {
             vector_db_token: vectordb.token,
             vector_db_username: vectordb.username,
             vector_db_password: vectordb.password,
+            vector_db_dfrr_bq1_threshold: vectordb.dfrr_bq1_threshold,
+            vector_db_dfrr_bq1_percentile_assist_sample_count: vectordb
+                .dfrr_bq1_percentile_assist_sample_count,
+            vector_db_dfrr_bq1_percentile_assist_target_rank: vectordb
+                .dfrr_bq1_percentile_assist_target_rank,
             sync_allowed_extensions: sync.allowed_extensions,
             sync_ignore_patterns: sync.ignore_patterns,
             sync_max_files: sync.max_files,
+            sync_max_chunks: sync.max_chunks,
             sync_max_file_size_bytes: sync.max_file_size_bytes,
         })
     }
@@ -1204,6 +1249,33 @@ fn apply_vector_db_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {
         &mut mapper.config.vector_db.password,
         env.vector_db_password.as_ref().map(SecretString::expose),
     );
+
+    if env.vector_db_dfrr_bq1_threshold.is_some()
+        || env
+            .vector_db_dfrr_bq1_percentile_assist_sample_count
+            .is_some()
+        || env
+            .vector_db_dfrr_bq1_percentile_assist_target_rank
+            .is_some()
+    {
+        let dfrr_search = mapper
+            .config
+            .vector_db
+            .dfrr_search
+            .get_or_insert_with(DfrrSearchConfig::default);
+        EnvConfigMapper::set_opt_dfrr_bq1_threshold(
+            &mut dfrr_search.bq1_threshold,
+            env.vector_db_dfrr_bq1_threshold,
+        );
+        EnvConfigMapper::set_opt_usize(
+            &mut dfrr_search.bq1_percentile_assist_sample_count,
+            env.vector_db_dfrr_bq1_percentile_assist_sample_count,
+        );
+        EnvConfigMapper::set_opt_dfrr_bq1_threshold(
+            &mut dfrr_search.bq1_percentile_assist_target_rank,
+            env.vector_db_dfrr_bq1_percentile_assist_target_rank,
+        );
+    }
 }
 
 fn apply_sync_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {
@@ -1217,6 +1289,7 @@ fn apply_sync_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {
         env.sync_ignore_patterns.as_ref(),
     );
     EnvConfigMapper::set_u32(&mut mapper.config.sync.max_files, env.sync_max_files);
+    EnvConfigMapper::set_opt_u32(&mut mapper.config.sync.max_chunks, env.sync_max_chunks);
     EnvConfigMapper::set_u64(
         &mut mapper.config.sync.max_file_size_bytes,
         env.sync_max_file_size_bytes,
@@ -1262,6 +1335,12 @@ impl<'a> EnvConfigMapper<'a> {
         }
     }
 
+    const fn set_opt_usize(field: &mut Option<usize>, value: Option<usize>) {
+        if value.is_some() {
+            *field = value;
+        }
+    }
+
     const fn set_opt_index_mode(field: &mut IndexMode, value: Option<IndexMode>) {
         if let Some(value) = value {
             *field = value;
@@ -1289,6 +1368,15 @@ impl<'a> EnvConfigMapper<'a> {
     const fn set_opt_vector_search_strategy(
         field: &mut Option<VectorSearchStrategy>,
         value: Option<VectorSearchStrategy>,
+    ) {
+        if value.is_some() {
+            *field = value;
+        }
+    }
+
+    const fn set_opt_dfrr_bq1_threshold(
+        field: &mut Option<DfrrBq1Threshold>,
+        value: Option<DfrrBq1Threshold>,
     ) {
         if value.is_some() {
             *field = value;
@@ -1330,6 +1418,13 @@ pub enum EnvParseError {
     },
     /// Integer env var had an invalid value.
     InvalidInt {
+        /// Env var name.
+        var: &'static str,
+        /// Raw input value.
+        value: String,
+    },
+    /// Float env var had an invalid value.
+    InvalidFloat {
         /// Env var name.
         var: &'static str,
         /// Raw input value.
@@ -1382,6 +1477,7 @@ impl EnvParseError {
             },
             Self::InvalidBool { .. } => ErrorCode::new("config", "invalid_env_bool"),
             Self::InvalidInt { .. } => ErrorCode::new("config", "invalid_env_int"),
+            Self::InvalidFloat { .. } => ErrorCode::new("config", "invalid_env_float"),
             Self::InvalidUrl { .. } => ErrorCode::new("config", "invalid_env_url"),
             Self::InvalidEnum { .. } => ErrorCode::new("config", "invalid_env_enum"),
             Self::CsvTooLarge { .. }
@@ -1399,6 +1495,9 @@ impl fmt::Display for EnvParseError {
             },
             Self::InvalidBool { var, .. } => write!(formatter, "{var} must be a boolean"),
             Self::InvalidInt { var, .. } => write!(formatter, "{var} must be an integer"),
+            Self::InvalidFloat { var, .. } => {
+                write!(formatter, "{var} must be a float in [0.0, 1.0]")
+            },
             Self::InvalidUrl { var, .. } => write!(formatter, "{var} must be a valid URL"),
             Self::InvalidEnum { var, .. } => write!(formatter, "{var} has an unsupported value"),
             Self::CsvTooLarge { var, len, max } => {
@@ -1431,6 +1530,7 @@ impl From<EnvParseError> for ErrorEnvelope {
             },
             EnvParseError::InvalidBool { var, value }
             | EnvParseError::InvalidInt { var, value }
+            | EnvParseError::InvalidFloat { var, value }
             | EnvParseError::InvalidUrl { var, value }
             | EnvParseError::InvalidEnum { var, value } => {
                 envelope = envelope
@@ -1563,6 +1663,57 @@ fn parse_optional_u32(
             var,
             value: raw.clone(),
         })
+}
+
+fn parse_optional_usize(
+    map: &BTreeMap<String, String>,
+    var: &'static str,
+) -> Result<Option<usize>, EnvParseError> {
+    let Some(raw) = map.get(var) else {
+        return Ok(None);
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(EnvParseError::EmptyValue { var });
+    }
+
+    trimmed
+        .parse::<usize>()
+        .map(Some)
+        .map_err(|_| EnvParseError::InvalidInt {
+            var,
+            value: raw.clone(),
+        })
+}
+
+fn parse_optional_dfrr_bq1_threshold(
+    map: &BTreeMap<String, String>,
+    var: &'static str,
+) -> Result<Option<DfrrBq1Threshold>, EnvParseError> {
+    let Some(raw) = map.get(var) else {
+        return Ok(None);
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(EnvParseError::EmptyValue { var });
+    }
+
+    let value = trimmed
+        .parse::<f32>()
+        .map_err(|_| EnvParseError::InvalidFloat {
+            var,
+            value: raw.clone(),
+        })?;
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(EnvParseError::InvalidFloat {
+            var,
+            value: raw.clone(),
+        });
+    }
+
+    Ok(Some(DfrrBq1Threshold::new(value)))
 }
 
 fn parse_optional_u32_any(
@@ -1914,6 +2065,7 @@ fn redact_value(var: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::load_backend_config_from_sources;
     use std::error::Error;
 
     #[test]
@@ -2010,6 +2162,81 @@ mod tests {
         let env = BackendEnv::from_map(&map)?;
         assert_eq!(env.vector_db_vector_kernel, Some(VectorKernelKind::Dfrr));
         Ok(())
+    }
+
+    #[test]
+    fn vector_db_dfrr_bq1_env_parses_threshold_fields() -> Result<(), Box<dyn Error>> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            ENV_VECTOR_DB_DFRR_BQ1_THRESHOLD.to_string(),
+            "0.30".to_string(),
+        );
+        map.insert(
+            ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_SAMPLE_COUNT.to_string(),
+            "16".to_string(),
+        );
+        map.insert(
+            ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_TARGET_RANK.to_string(),
+            "0.25".to_string(),
+        );
+
+        let env = BackendEnv::from_map(&map)?;
+        assert_eq!(
+            env.vector_db_dfrr_bq1_threshold,
+            Some(DfrrBq1Threshold::new(0.30))
+        );
+        assert_eq!(
+            env.vector_db_dfrr_bq1_percentile_assist_sample_count,
+            Some(16)
+        );
+        assert_eq!(
+            env.vector_db_dfrr_bq1_percentile_assist_target_rank,
+            Some(DfrrBq1Threshold::new(0.25))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_dfrr_bq1_env_materializes_dfrr_search_block() -> Result<(), Box<dyn Error>> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            ENV_VECTOR_DB_DFRR_BQ1_THRESHOLD.to_string(),
+            "0.30".to_string(),
+        );
+        map.insert(
+            ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_SAMPLE_COUNT.to_string(),
+            "16".to_string(),
+        );
+        map.insert(
+            ENV_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_TARGET_RANK.to_string(),
+            "0.25".to_string(),
+        );
+
+        let config = load_backend_config_from_sources(None, None, &map)?;
+        let dfrr = config
+            .vector_db
+            .dfrr_search
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("expected dfrrSearch to be materialized"))?;
+        assert_eq!(dfrr.bq1_threshold, Some(DfrrBq1Threshold::new(0.30)));
+        assert_eq!(dfrr.bq1_percentile_assist_sample_count, Some(16));
+        assert_eq!(
+            dfrr.bq1_percentile_assist_target_rank,
+            Some(DfrrBq1Threshold::new(0.25))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_dfrr_bq1_env_rejects_out_of_range_threshold() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            ENV_VECTOR_DB_DFRR_BQ1_THRESHOLD.to_string(),
+            "1.50".to_string(),
+        );
+
+        let error = BackendEnv::from_map(&map).err();
+        assert!(matches!(error, Some(EnvParseError::InvalidFloat { .. })));
     }
 
     #[test]

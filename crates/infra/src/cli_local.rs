@@ -7,7 +7,9 @@ use crate::cli_manifest::{
     ensure_default_config, read_manifest, touch_manifest, write_manifest,
 };
 use crate::embedding_factory::build_embedding_port_with_telemetry;
-use crate::vectordb_factory::{build_local_kernel, build_vectordb_port};
+use crate::vectordb_factory::{
+    DfrrPrewarmPlanSummary, build_local_kernel, build_vectordb_port, summarize_dfrr_prewarm_plan,
+};
 use crate::{InfraError, InfraResult};
 use semantic_code_adapters::{
     IgnoreMatcher, JsonLogger, JsonTelemetry, LocalCalibrationAdapter, LocalFileSync,
@@ -27,10 +29,13 @@ use semantic_code_config::{
     load_backend_config_std_env, load_runtime_env_std_env, to_pretty_toml,
 };
 use semantic_code_domain::{
-    CalibrationParams, CalibrationState, CollectionName, CollectionNamingInput, IndexMode,
-    derive_collection_name,
+    CalibrationParams, CalibrationState, CollectionName, CollectionNamingInput,
+    EmbeddingProviderId, IndexMode, derive_collection_name,
 };
-use semantic_code_ports::{LogFields, LogLevel, LoggerPort, TelemetryPort, TelemetryTags};
+use semantic_code_ports::{
+    EmbedBatchRequest, EmbedRequest, EmbeddingPort, EmbeddingProviderInfo, EmbeddingVector,
+    LogFields, LogLevel, LoggerPort, TelemetryPort, TelemetryTags,
+};
 use semantic_code_shared::{
     BoundedU32, ErrorClass, ErrorCode, ErrorEnvelope, REDACTED_VALUE, RequestContext,
 };
@@ -175,7 +180,12 @@ fn build_index_input(
             config.limits().embedding_batch_size.get(),
             "embedding batch size",
         )?,
-        chunk_limit: DEFAULT_CHUNK_LIMIT,
+        chunk_limit: config
+            .limits()
+            .sync_max_chunks
+            .map(|limit| nonzero_usize_from_u32(limit.get(), "sync max chunks"))
+            .transpose()?
+            .unwrap_or(DEFAULT_CHUNK_LIMIT),
         max_files: Some(nonzero_usize_from_u32(
             config.limits().sync_max_files.get(),
             "sync max files",
@@ -264,7 +274,8 @@ pub fn run_index_local_with_progress(
         codebase_root,
         scoped_telemetry.clone(),
     )?;
-    let input = build_index_input(&config, &manifest, request, on_progress)?;
+    let input = build_index_input(&config, &manifest, request, on_progress.clone())?;
+    let dfrr_prewarm_summary = summarize_dfrr_prewarm_plan(&config)?;
 
     // Capture auto-calibrate flag before config is moved into the async closure.
     let should_auto_calibrate = config.vector_db.effective_vector_kernel()
@@ -300,7 +311,17 @@ pub fn run_index_local_with_progress(
         let result = index_codebase(&ctx, &deps, input).await;
         let result = match result {
             Ok(output) => {
+                emit_post_index_progress(
+                    on_progress.as_ref(),
+                    &dfrr_prewarm_summary,
+                    PostIndexPhase::Start,
+                );
                 deps.vectordb.flush(&ctx, collection_name).await?;
+                emit_post_index_progress(
+                    on_progress.as_ref(),
+                    &dfrr_prewarm_summary,
+                    PostIndexPhase::Complete,
+                );
                 Ok(output)
             },
             Err(err) => Err(err),
@@ -397,6 +418,67 @@ pub struct LocalSearchSession {
     runtime: tokio::runtime::Runtime,
 }
 
+#[derive(Debug)]
+struct QueryVectorsOnlyEmbedding {
+    info: EmbeddingProviderInfo,
+}
+
+impl QueryVectorsOnlyEmbedding {
+    fn new() -> InfraResult<Self> {
+        let id = EmbeddingProviderId::parse("query-vectors-only").map_err(|error| {
+            ErrorEnvelope::unexpected(
+                ErrorCode::internal(),
+                format!("failed to construct query-vectors-only embedding provider id: {error}"),
+                ErrorClass::NonRetriable,
+            )
+        })?;
+        Ok(Self {
+            info: EmbeddingProviderInfo {
+                id,
+                name: "Query vectors only".into(),
+            },
+        })
+    }
+
+    fn unavailable_error() -> ErrorEnvelope {
+        ErrorEnvelope::expected(
+            ErrorCode::new("embedding", "query_vector_required"),
+            "embedding is disabled for this session; provide queryVector input",
+        )
+    }
+}
+
+impl EmbeddingPort for QueryVectorsOnlyEmbedding {
+    fn provider(&self) -> &EmbeddingProviderInfo {
+        &self.info
+    }
+
+    fn detect_dimension(
+        &self,
+        _ctx: &RequestContext,
+        _request: semantic_code_ports::DetectDimensionRequest,
+    ) -> semantic_code_ports::BoxFuture<'_, semantic_code_shared::Result<u32>> {
+        Box::pin(async { Err(Self::unavailable_error()) })
+    }
+
+    fn embed(
+        &self,
+        _ctx: &RequestContext,
+        _request: EmbedRequest,
+    ) -> semantic_code_ports::BoxFuture<'_, semantic_code_shared::Result<EmbeddingVector>> {
+        Box::pin(async { Err(Self::unavailable_error()) })
+    }
+
+    fn embed_batch(
+        &self,
+        _ctx: &RequestContext,
+        _request: EmbedBatchRequest,
+    ) -> semantic_code_ports::BoxFuture<'_, semantic_code_shared::Result<Vec<EmbeddingVector>>>
+    {
+        Box::pin(async { Err(Self::unavailable_error()) })
+    }
+}
+
 impl LocalSearchSession {
     /// Execute a single search against the warm session.
     pub fn search(
@@ -424,7 +506,7 @@ impl LocalSearchSession {
     pub fn search_with_vector(
         &self,
         query_label: &str,
-        vector: semantic_code_ports::EmbeddingVector,
+        vector: EmbeddingVector,
         top_k: Option<u32>,
         threshold: Option<f32>,
     ) -> InfraResult<SemanticSearchOutput> {
@@ -444,7 +526,7 @@ impl LocalSearchSession {
     }
 
     /// Embed a query string and return the raw vector.
-    pub fn embed(&self, query: &str) -> InfraResult<semantic_code_ports::EmbeddingVector> {
+    pub fn embed(&self, query: &str) -> InfraResult<EmbeddingVector> {
         let ctx = RequestContext::new_request();
         let deps = self.deps.clone();
         self.runtime.block_on(async {
@@ -471,6 +553,29 @@ pub fn open_search_session(
     overrides_json: Option<&str>,
     codebase_root: &Path,
 ) -> InfraResult<LocalSearchSession> {
+    open_search_session_with_options(config_path, overrides_json, codebase_root, false)
+}
+
+/// Open a warm search session with optional deferred embedding initialization.
+///
+/// When `query_vectors_only` is `true`, the session uses a lightweight
+/// placeholder embedding port and requires callers to provide `queryVector`
+/// payloads for search execution.
+#[tracing::instrument(
+    name = "infra.open_search_session_with_options",
+    skip_all,
+    fields(
+        has_config_path = config_path.is_some(),
+        has_overrides_json = overrides_json.is_some(),
+        query_vectors_only = query_vectors_only,
+    )
+)]
+pub fn open_search_session_with_options(
+    config_path: Option<&Path>,
+    overrides_json: Option<&str>,
+    codebase_root: &Path,
+    query_vectors_only: bool,
+) -> InfraResult<LocalSearchSession> {
     let config_path = resolve_config_path(config_path, codebase_root);
     let (config, env) = load_config_with_env(config_path.as_deref(), overrides_json)?;
     let manifest = ensure_manifest(codebase_root, &config, false)?;
@@ -478,17 +583,24 @@ pub fn open_search_session(
     let ctx = RequestContext::new_request();
     let scoped_logger = scope_logger(observability.logger.as_ref(), &ctx);
     let scoped_telemetry = scope_telemetry(observability.telemetry.as_ref(), &ctx);
-    let embedding = build_embedding_port_with_telemetry(
-        &config,
-        &env,
-        codebase_root,
-        scoped_telemetry.clone(),
-    )?;
+    let embedding: Arc<dyn EmbeddingPort> = if query_vectors_only {
+        Arc::new(QueryVectorsOnlyEmbedding::new()?)
+    } else {
+        build_embedding_port_with_telemetry(&config, &env, codebase_root, scoped_telemetry.clone())?
+    };
 
     let snapshot_storage = manifest.snapshot_storage;
     let codebase_root_buf = codebase_root.to_path_buf();
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Use multi_thread(1) instead of current_thread to avoid a rare edge case
+    // where spawn_blocking wakeups are lost on macOS kqueue (edge-triggered).
+    // The session drives two sequential spawn_blocking tasks during collection
+    // load (v2 index + 665MB JSONL sidecar), and the current_thread runtime's
+    // single wake path can miss the completion notification, causing permanent hang.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(2)
+        .thread_name("sca-search-rt")
         .enable_all()
         .build()
         .map_err(InfraError::from)?;
@@ -504,7 +616,10 @@ pub fn open_search_session(
         telemetry: scoped_telemetry,
     };
 
-    tracing::info!("search session opened; index loaded and warm");
+    tracing::info!(
+        query_vectors_only = query_vectors_only,
+        "search session opened; index loaded and warm"
+    );
 
     Ok(LocalSearchSession {
         deps,
@@ -744,7 +859,12 @@ fn build_reindex_input(
             config.limits().embedding_batch_size.get(),
             "embedding batch size",
         )?,
-        chunk_limit: DEFAULT_CHUNK_LIMIT,
+        chunk_limit: config
+            .limits()
+            .sync_max_chunks
+            .map(|limit| nonzero_usize_from_u32(limit.get(), "sync max chunks"))
+            .transpose()?
+            .unwrap_or(DEFAULT_CHUNK_LIMIT),
         max_files: Some(nonzero_usize_from_u32(
             config.limits().sync_max_files.get(),
             "sync max files",
@@ -832,7 +952,8 @@ pub fn run_reindex_local_with_progress(
         codebase_root,
         scoped_telemetry.clone(),
     )?;
-    let input = build_reindex_input(&config, &manifest, request, on_progress)?;
+    let input = build_reindex_input(&config, &manifest, request, on_progress.clone())?;
+    let dfrr_prewarm_summary = summarize_dfrr_prewarm_plan(&config)?;
 
     let snapshot_storage = manifest.snapshot_storage;
     let codebase_root = request.as_ref().codebase_root.clone();
@@ -860,7 +981,17 @@ pub fn run_reindex_local_with_progress(
         let result = reindex_by_change(&ctx, &deps, input).await;
         let result = match result {
             Ok(output) => {
+                emit_post_index_progress(
+                    on_progress.as_ref(),
+                    &dfrr_prewarm_summary,
+                    PostIndexPhase::Start,
+                );
                 deps.vectordb.flush(&ctx, collection_name).await?;
+                emit_post_index_progress(
+                    on_progress.as_ref(),
+                    &dfrr_prewarm_summary,
+                    PostIndexPhase::Complete,
+                );
                 Ok(output)
             },
             Err(err) => Err(err),
@@ -868,6 +999,42 @@ pub fn run_reindex_local_with_progress(
         finalize_cancel_watcher(cancel_handle).await?;
         result
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PostIndexPhase {
+    Start,
+    Complete,
+}
+
+fn emit_post_index_progress(
+    on_progress: Option<&Arc<dyn Fn(IndexProgress) + Send + Sync>>,
+    prewarm_summary: &DfrrPrewarmPlanSummary,
+    phase: PostIndexPhase,
+) {
+    let Some(callback) = on_progress else {
+        return;
+    };
+
+    let (label, current, total) = if prewarm_summary.is_empty() {
+        match phase {
+            PostIndexPhase::Start => ("Finalizing generation...", 0, 1),
+            PostIndexPhase::Complete => ("Finalizing generation...", 1, 1),
+        }
+    } else {
+        let total = prewarm_summary.total_unique_ready_states();
+        match phase {
+            PostIndexPhase::Start => ("Prewarming kernel ready states...", 0, total),
+            PostIndexPhase::Complete => ("Prewarming kernel ready states...", total, total),
+        }
+    };
+
+    callback(IndexProgress {
+        phase: label.into(),
+        current,
+        total,
+        percentage: 100,
+    });
 }
 
 /// Initialize config and manifest for a codebase.
@@ -1392,7 +1559,15 @@ fn run_async_with_ctx<F, T>(
 where
     F: Future<Output = Result<T, ErrorEnvelope>>,
 {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Use multi_thread(1) instead of current_thread to avoid a macOS-specific
+    // edge case where spawn_blocking wakeup notifications are lost due to
+    // kqueue edge-triggered semantics.  The single-worker multi_thread runtime
+    // has the same task-scheduling behaviour as current_thread but uses a
+    // thread-safe unpark signal that survives edge-triggered coalescing.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(2)
+        .thread_name("sca-cli-rt")
         .enable_all()
         .build()
         .map_err(InfraError::from)?;

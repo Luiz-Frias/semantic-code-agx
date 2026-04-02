@@ -26,12 +26,12 @@ gemini = ["dep:reqwest"]
 ollama = ["dep:reqwest"]
 voyage = ["dep:reqwest"]
 onnx = ["dep:ort", "dep:tokenizers"]
-ane = ["dep:ane-inference"]
+ane = []  # Stub — requires private ane-inference crate (not available in public builds)
 milvus-rest = ["dep:reqwest"]
 milvus-grpc = ["dep:base64", "dep:bytes", "dep:prost", "dep:tonic"]
 cache-postgres = ["dep:sqlx", "sqlx/postgres"]
 cache-mysql = ["dep:sqlx", "sqlx/mysql"]
-cache-mssql = ["dep:tiberius", "dep:tokio-util", "dep:futures-util"]
+cache-mssql = ["dep:tiberius", "dep:futures-util"]
 experimental-dfrr-kernel = []
 
 [dependencies]
@@ -58,7 +58,7 @@ tree-sitter-typescript.workspace = true
 reqwest = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
-ane-inference = { workspace = true, optional = true }
+# ane-inference = { workspace = true, optional = true }  # Private dep
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
@@ -66,7 +66,7 @@ tonic = { workspace = true, optional = true }
 rusqlite.workspace = true
 sqlx = { workspace = true, optional = true }
 tiberius = { workspace = true, optional = true }
-tokio-util = { workspace = true, optional = true }
+tokio-util.workspace = true
 futures-util = { workspace = true, optional = true }
 
 [dev-dependencies]

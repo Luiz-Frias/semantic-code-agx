@@ -325,7 +325,7 @@ Valid providers:
 - `voyage`
 - `ollama`
 
-See [Troubleshooting](../TROUBLESHOOTING.md) for more.
+See [Troubleshooting](../troubleshooting.md) for more.
 
 ## Related
 

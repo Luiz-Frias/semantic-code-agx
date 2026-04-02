@@ -222,7 +222,7 @@ vector_db = "milvus"          # Scalable vector DB
 - Verify file extensions are supported
 - Check file permissions
 
-See [Troubleshooting](../TROUBLESHOOTING.md) for more solutions.
+See [Troubleshooting](../troubleshooting.md) for more solutions.
 
 ## API Reference
 

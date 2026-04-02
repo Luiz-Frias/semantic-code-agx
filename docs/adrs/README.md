@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADRs)
 
-ADRs capture key architectural decisions and the reasoning behind them. Use the template at `docs/templates/adr.template.md` when adding a new ADR.
+ADRs capture key architectural decisions and the reasoning behind them.
 
 ## Index
 
@@ -20,7 +20,6 @@ ADRs capture key architectural decisions and the reasoning behind them. Use the 
 ## Conventions
 
 - Number ADRs sequentially (0001, 0002, ...)
-- Use template at `docs/templates/adr.template.md`
 - Keep ADRs short and decision-focused
 - Include alternatives considered
 - Link to related architecture docs

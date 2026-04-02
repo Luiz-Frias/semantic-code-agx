@@ -356,7 +356,7 @@ Common issues and how to solve them.
 
 If you can't find a solution:
 
-1. **Check [FAQ](./FAQ.md)** - Frequently asked questions
+1. **Check [FAQ](./faq.md)** - Frequently asked questions
 2. **Read [Configuration Guide](./guides/configuration.md)** - Understand configuration options
 3. **Check [API Reference](./reference/api-v1.md)** - Verify API usage
 4. **Open a GitHub Issue** - Include:

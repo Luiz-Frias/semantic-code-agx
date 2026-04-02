@@ -16,6 +16,13 @@ pub enum Commands {
     SelfCheck,
     /// Show build and version details.
     Info,
+    /// Print the machine-readable agent protocol spec (YAML).
+    #[command(after_help = "Output is always YAML regardless of --output flag.")]
+    AgentDoc {
+        /// Scope output to a specific command (e.g., `search`, `index`).
+        #[arg(value_name = "COMMAND")]
+        command: Option<String>,
+    },
     /// Config-related commands.
     Config {
         #[command(subcommand)]
@@ -27,6 +34,7 @@ pub enum Commands {
         command: JobsCommands,
     },
     /// Initialize config and manifest for a codebase.
+    #[command(after_help = "Agents: run `sca agent-doc init` for this command's protocol spec.")]
     Init {
         /// Optional config file path (JSON/TOML). Defaults to `.context/config.toml`.
         #[arg(long)]
@@ -105,6 +113,7 @@ pub enum Commands {
         danger_close_storage: bool,
     },
     /// Index the local codebase.
+    #[command(after_help = "Agents: run `sca agent-doc index` for this command's protocol spec.")]
     Index {
         /// Optional config file path (JSON/TOML). Defaults to `.context/config.toml` when present.
         #[arg(long)]
@@ -177,6 +186,7 @@ pub enum Commands {
         overrides_json: Option<String>,
     },
     /// Search the local codebase.
+    #[command(after_help = "Agents: run `sca agent-doc search` for this command's protocol spec.")]
     Search {
         /// Search query text.
         #[arg(long)]
@@ -191,6 +201,9 @@ pub enum Commands {
         /// Each output line: `{"status":"ok","results":[...],"searchStats":{...}}`
         #[arg(long, conflicts_with_all = ["query", "stdin"])]
         stdin_batch: bool,
+        /// Internal: skip embedding initialization and require pre-computed query vectors.
+        #[arg(long, hide = true, requires = "stdin_batch")]
+        query_vectors_only: bool,
         /// Optional top-k override.
         #[arg(long, alias = "max-results")]
         top_k: Option<u32>,
@@ -241,6 +254,7 @@ pub enum Commands {
         overrides_json: Option<String>,
     },
     /// Clear the local index and snapshot.
+    #[command(after_help = "Agents: run `sca agent-doc clear` for this command's protocol spec.")]
     Clear {
         /// Optional config file path (JSON/TOML). Defaults to `.context/config.toml` when present.
         #[arg(long)]
@@ -274,6 +288,7 @@ pub enum Commands {
         vector_db_password: Option<String>,
     },
     /// Report local index status.
+    #[command(after_help = "Agents: run `sca agent-doc status` for this command's protocol spec.")]
     Status {
         /// Optional config file path (JSON/TOML). Defaults to `.context/config.toml` when present.
         #[arg(long)]
@@ -307,6 +322,7 @@ pub enum Commands {
         vector_db_password: Option<String>,
     },
     /// Reindex based on snapshot changes.
+    #[command(after_help = "Agents: run `sca agent-doc reindex` for this command's protocol spec.")]
     Reindex {
         /// Optional config file path (JSON/TOML). Defaults to `.context/config.toml` when present.
         #[arg(long)]
@@ -416,25 +432,6 @@ pub enum Commands {
         /// Vector DB auth password.
         #[arg(long)]
         vector_db_password: Option<String>,
-    },
-    /// Create a subset or tiled copy of a v2 snapshot.
-    SnapshotSubset {
-        /// Source snapshot directory (must contain a v2 snapshot).
-        #[arg(long)]
-        source: PathBuf,
-        /// Destination snapshot directory (will be created).
-        #[arg(long)]
-        dest: PathBuf,
-        /// Target record count for the output snapshot.
-        #[arg(long)]
-        target_count: u64,
-        /// PRNG seed for deterministic sampling (default: 0).
-        #[arg(long, default_value_t = 0)]
-        seed: u64,
-        /// Gaussian noise sigma for tiled copies (0.0 = exact duplicates).
-        /// Applied in SQ8 u8 space; ~5.0 ≈ 2% perturbation, ~10.0 ≈ 4%.
-        #[arg(long, default_value_t = 0.0)]
-        noise_sigma: f32,
     },
     /// Validate a request payload against the request validators.
     #[command(hide = true)]

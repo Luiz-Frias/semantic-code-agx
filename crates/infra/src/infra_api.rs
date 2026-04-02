@@ -5,8 +5,8 @@ pub use crate::cli_calibration::{
 };
 pub use crate::cli_local::{
     CliConfigSummary, CliInitStatus, CliStatus, LocalSearchSession, SnapshotStatus,
-    open_search_session, read_status_local, run_calibrate_local, run_clear_local, run_index_local,
-    run_init_local, run_reindex_local, run_search_local,
+    open_search_session, open_search_session_with_options, read_status_local, run_calibrate_local,
+    run_clear_local, run_index_local, run_init_local, run_reindex_local, run_search_local,
 };
 pub use crate::config_check::load_effective_config_json;
 pub use crate::env_check::{InfraError, InfraResult, validate_env_parsing};

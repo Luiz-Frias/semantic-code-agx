@@ -39,6 +39,8 @@ fn sample_metadata(path: &str) -> Result<VectorDocumentMetadata, Box<dyn std::er
         language: None,
         file_extension: Some("rs".into()),
         span: LineSpan::new(1, 1)?,
+        fragment_start_byte: None,
+        fragment_end_byte: None,
         node_kind: None,
     })
 }
@@ -130,7 +132,7 @@ async fn vectordb_search_strategy_config_toggles_local_search_path()
         options: VectorSearchOptions {
             top_k: Some(1),
             filter_expr: None,
-            threshold: None,
+            threshold: Some(0.1),
         },
     };
     let f32_results = f32_port.search(&ctx, request.clone()).await?;

@@ -2,6 +2,7 @@
 
 use semantic_code_ports::{CodeChunk, Language, LineSpan, SplitOptions, SplitterPort};
 use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope, RequestContext, Result};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::Instrument;
 use tree_sitter::{Node, Parser, Tree};
@@ -83,6 +84,7 @@ impl SplitterPort for TreeSitterSplitter {
 
                 ranges = apply_overlap(ranges, config.chunk_overlap, total_lines);
                 ranges = split_ranges_by_char_limit(ranges, &line_lengths, max_chunk_chars);
+                ranges = dedupe_ranges_preserve_order(ranges);
 
                 build_chunks(
                     &ctx,
@@ -130,10 +132,17 @@ impl SplitConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SpanRange {
     start: u32,
     end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChunkContentFragment {
+    content: Box<str>,
+    start_byte: u32,
+    end_byte: u32,
 }
 
 fn parse_tree(code: &str, language: Language, file_path: Option<&str>) -> Option<Tree> {
@@ -407,9 +416,16 @@ fn split_ranges_by_char_limit(
     output
 }
 
-fn split_content_by_max_chars(content: &str, max_chars: usize) -> Vec<Box<str>> {
+fn split_content_by_max_chars(
+    content: &str,
+    max_chars: usize,
+) -> Result<Vec<ChunkContentFragment>> {
     if max_chars == 0 || content.len() <= max_chars {
-        return vec![content.to_owned().into_boxed_str()];
+        return Ok(vec![ChunkContentFragment {
+            content: content.to_owned().into_boxed_str(),
+            start_byte: 0,
+            end_byte: usize_to_u32(content.len())?,
+        }]);
     }
 
     let mut output = Vec::new();
@@ -426,11 +442,28 @@ fn split_content_by_max_chars(content: &str, max_chars: usize) -> Vec<Box<str>> 
             }
         }
 
-        output.push(content[start..end].to_owned().into_boxed_str());
+        output.push(ChunkContentFragment {
+            content: content[start..end].to_owned().into_boxed_str(),
+            start_byte: usize_to_u32(start)?,
+            end_byte: usize_to_u32(end)?,
+        });
         start = end;
     }
 
-    output
+    Ok(output)
+}
+
+fn dedupe_ranges_preserve_order(ranges: Vec<SpanRange>) -> Vec<SpanRange> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::with_capacity(ranges.len());
+
+    for range in ranges {
+        if seen.insert((range.start, range.end)) {
+            deduped.push(range);
+        }
+    }
+
+    deduped
 }
 
 fn split_range(start: u32, end: u32, chunk_size: usize, total_lines: u32) -> Vec<SpanRange> {
@@ -507,10 +540,14 @@ fn build_chunks(
         ctx.ensure_not_cancelled("splitter.build_chunks")?;
         let content = content_for_span(lines, span)?;
         let line_span = LineSpan::new(span.start, span.end).map_err(ErrorEnvelope::from)?;
-        for content in split_content_by_max_chars(content.as_ref(), max_chunk_chars) {
+        let fragments = split_content_by_max_chars(content.as_ref(), max_chunk_chars)?;
+        let mark_fragment_offsets = fragments.len() > 1;
+        for fragment in fragments {
             chunks.push(CodeChunk {
-                content,
+                content: fragment.content,
                 span: line_span,
+                fragment_start_byte: mark_fragment_offsets.then_some(fragment.start_byte),
+                fragment_end_byte: mark_fragment_offsets.then_some(fragment.end_byte),
                 language: Some(language),
                 file_path: file_path.clone(),
             });
@@ -555,6 +592,16 @@ fn to_usize(value: u32) -> Result<usize> {
     })
 }
 
+fn usize_to_u32(value: usize) -> Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        ErrorEnvelope::unexpected(
+            ErrorCode::internal(),
+            "fragment byte offset conversion overflow",
+            ErrorClass::NonRetriable,
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,6 +637,96 @@ mod tests {
         assert_eq!(out[1].end, 3);
     }
 
+    #[test]
+    fn split_content_by_max_chars_tracks_fragment_offsets() -> Result<()> {
+        let fragments = split_content_by_max_chars("abcdefghij", 4)?;
+
+        assert_eq!(
+            fragments,
+            vec![
+                ChunkContentFragment {
+                    content: "abcd".into(),
+                    start_byte: 0,
+                    end_byte: 4,
+                },
+                ChunkContentFragment {
+                    content: "efgh".into(),
+                    start_byte: 4,
+                    end_byte: 8,
+                },
+                ChunkContentFragment {
+                    content: "ij".into(),
+                    start_byte: 8,
+                    end_byte: 10,
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dedupe_ranges_preserves_order_for_identical_spans() {
+        let ranges = vec![
+            SpanRange { start: 1, end: 3 },
+            SpanRange { start: 4, end: 6 },
+            SpanRange { start: 4, end: 6 },
+            SpanRange { start: 7, end: 8 },
+        ];
+
+        let out = dedupe_ranges_preserve_order(ranges);
+
+        assert_eq!(
+            out,
+            vec![
+                SpanRange { start: 1, end: 3 },
+                SpanRange { start: 4, end: 6 },
+                SpanRange { start: 7, end: 8 },
+            ]
+        );
+    }
+
+    #[test]
+    fn overlap_and_char_limit_pipeline_dedupes_identical_spans() {
+        let line_lengths = vec![10; 8];
+        let ranges = vec![
+            SpanRange { start: 1, end: 6 },
+            SpanRange { start: 7, end: 8 },
+        ];
+
+        let overlapped = apply_overlap(ranges, 3, 8);
+        let split = split_ranges_by_char_limit(overlapped, &line_lengths, 30);
+        let out = dedupe_ranges_preserve_order(split);
+
+        assert_eq!(
+            out,
+            vec![
+                SpanRange { start: 1, end: 3 },
+                SpanRange { start: 4, end: 6 },
+                SpanRange { start: 7, end: 8 },
+            ]
+        );
+    }
+
+    #[test]
+    fn dedupe_ranges_keeps_overlapping_but_distinct_spans() {
+        let ranges = vec![
+            SpanRange { start: 1, end: 3 },
+            SpanRange { start: 3, end: 5 },
+            SpanRange { start: 5, end: 7 },
+        ];
+
+        let out = dedupe_ranges_preserve_order(ranges);
+
+        assert_eq!(
+            out,
+            vec![
+                SpanRange { start: 1, end: 3 },
+                SpanRange { start: 3, end: 5 },
+                SpanRange { start: 5, end: 7 },
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn long_line_is_split_below_max_chars() -> Result<()> {
         let splitter = TreeSitterSplitter::new(2, 0);
@@ -610,6 +747,12 @@ mod tests {
         assert_eq!(chunks[1].content.len(), 50);
         assert_eq!(chunks[2].content.len(), 23);
         assert!(chunks.iter().all(|chunk| chunk.content.len() <= 50));
+        assert_eq!(chunks[0].fragment_start_byte, Some(0));
+        assert_eq!(chunks[0].fragment_end_byte, Some(50));
+        assert_eq!(chunks[1].fragment_start_byte, Some(50));
+        assert_eq!(chunks[1].fragment_end_byte, Some(100));
+        assert_eq!(chunks[2].fragment_start_byte, Some(100));
+        assert_eq!(chunks[2].fragment_end_byte, Some(123));
         Ok(())
     }
 

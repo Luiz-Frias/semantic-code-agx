@@ -1,5 +1,6 @@
 //! CLI library entrypoint for binary wrappers.
 
+mod agent_doc;
 mod args;
 mod commands;
 mod config_cmd;
@@ -18,9 +19,9 @@ use args::{
 };
 use clap::Parser;
 use commands::{
-    CalibrateCommandInput, SearchCommandInput, SnapshotSubsetCommandInput, run_calibrate,
-    run_clear, run_estimate_storage, run_index, run_info, run_init, run_jobs_cancel, run_jobs_run,
-    run_jobs_status, run_reindex, run_search, run_snapshot_subset, run_status,
+    CalibrateCommandInput, SearchCommandInput, run_calibrate, run_clear, run_estimate_storage,
+    run_index, run_info, run_init, run_jobs_cancel, run_jobs_run, run_jobs_status, run_reindex,
+    run_search, run_status,
 };
 use config_cmd::{config_check, config_show, config_validate};
 use dev::validate_request;
@@ -39,7 +40,8 @@ pub(crate) use output::{format_error_output, infra_exit_code};
     name = "sca",
     version,
     about = "Semantic code search CLI",
-    long_about = None
+    long_about = None,
+    after_help = "Agents: run `sca agent-doc` for the machine-readable protocol spec."
 )]
 struct Cli {
     #[command(flatten)]
@@ -86,6 +88,7 @@ const fn command_name(command: &Commands) -> &'static str {
         #[cfg(any(debug_assertions, feature = "dev-tools"))]
         Commands::SelfCheck => "self-check",
         Commands::Info => "info",
+        Commands::AgentDoc { .. } => "agent-doc",
         Commands::Config { .. } => "config",
         Commands::Jobs { .. } => "jobs",
         Commands::Init { .. } => "init",
@@ -96,7 +99,6 @@ const fn command_name(command: &Commands) -> &'static str {
         Commands::Status { .. } => "status",
         Commands::Reindex { .. } => "reindex",
         Commands::Calibrate { .. } => "calibrate",
-        Commands::SnapshotSubset { .. } => "snapshot-subset",
         Commands::ValidateRequest { .. } => "validate-request",
     }
 }
@@ -118,6 +120,7 @@ fn run(command: &Commands, mode: OutputMode) -> Result<CliOutput, CliError> {
         #[cfg(any(debug_assertions, feature = "dev-tools"))]
         Commands::SelfCheck => dev::self_check(mode),
         Commands::Info => run_info(mode),
+        Commands::AgentDoc { command } => agent_doc::run_agent_doc(command.as_deref()),
         Commands::Config { command } => match command {
             ConfigCommands::Check {
                 path,
@@ -172,22 +175,6 @@ fn run(command: &Commands, mode: OutputMode) -> Result<CliOutput, CliError> {
             ),
         },
         Commands::Calibrate { .. } => run_calibrate_from_command(command, mode),
-        Commands::SnapshotSubset {
-            source,
-            dest,
-            target_count,
-            seed,
-            noise_sigma,
-        } => {
-            let input = SnapshotSubsetCommandInput {
-                source,
-                dest,
-                target_count: *target_count,
-                seed: *seed,
-                noise_sigma: *noise_sigma,
-            };
-            run_snapshot_subset(mode, &input)
-        },
         Commands::Index { .. }
         | Commands::Search { .. }
         | Commands::Clear { .. }
@@ -372,6 +359,7 @@ fn run_search_from_command(command: &Commands, mode: OutputMode) -> Result<CliOu
         query,
         stdin,
         stdin_batch,
+        query_vectors_only,
         top_k,
         threshold,
         filter_expr,
@@ -420,6 +408,7 @@ fn run_search_from_command(command: &Commands, mode: OutputMode) -> Result<CliOu
             *top_k,
             *threshold,
             *include_content,
+            *query_vectors_only,
         );
     }
 
@@ -802,6 +791,30 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_agent_doc_bare() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["cli", "agent-doc"])?;
+        match cli.command {
+            Commands::AgentDoc { command } => {
+                assert!(command.is_none(), "bare agent-doc should have no scope");
+            },
+            _ => return Err("expected agent-doc command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cli_parses_agent_doc_scoped() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["cli", "agent-doc", "search"])?;
+        match cli.command {
+            Commands::AgentDoc { command } => {
+                assert_eq!(command.as_deref(), Some("search"));
+            },
+            _ => return Err("expected agent-doc command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn reindex_rejects_invalid_codebase_root() -> Result<(), Box<dyn std::error::Error>> {
         let mode = OutputMode::from_args(&OutputArgs {
             output: None,
@@ -816,98 +829,5 @@ mod tests {
         assert_eq!(output.exit_code, ExitCode::InvalidInput);
         assert!(output.stdout.contains("status: error"));
         Ok(())
-    }
-
-    #[test]
-    fn cli_parses_snapshot_subset_flags() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = Cli::try_parse_from([
-            "cli",
-            "snapshot-subset",
-            "--source",
-            "/tmp/snap/src",
-            "--dest",
-            "/tmp/snap/dst",
-            "--target-count",
-            "500",
-            "--seed",
-            "42",
-        ])?;
-        match cli.command {
-            Commands::SnapshotSubset {
-                source,
-                dest,
-                target_count,
-                seed,
-                noise_sigma,
-            } => {
-                assert_eq!(source, PathBuf::from("/tmp/snap/src"));
-                assert_eq!(dest, PathBuf::from("/tmp/snap/dst"));
-                assert_eq!(target_count, 500);
-                assert_eq!(seed, 42);
-                assert!((noise_sigma - 0.0).abs() < f32::EPSILON);
-            },
-            _ => return Err("expected snapshot-subset command".into()),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn cli_snapshot_subset_seed_defaults_to_zero() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = Cli::try_parse_from([
-            "cli",
-            "snapshot-subset",
-            "--source",
-            "/tmp/snap/src",
-            "--dest",
-            "/tmp/snap/dst",
-            "--target-count",
-            "100",
-        ])?;
-        match cli.command {
-            Commands::SnapshotSubset { seed, .. } => {
-                assert_eq!(seed, 0);
-            },
-            _ => return Err("expected snapshot-subset command".into()),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn cli_snapshot_subset_requires_source() {
-        let result = Cli::try_parse_from([
-            "cli",
-            "snapshot-subset",
-            "--dest",
-            "/tmp/snap/dst",
-            "--target-count",
-            "100",
-        ]);
-        assert!(result.is_err(), "expected missing --source to fail");
-    }
-
-    #[test]
-    fn cli_snapshot_subset_requires_dest() {
-        let result = Cli::try_parse_from([
-            "cli",
-            "snapshot-subset",
-            "--source",
-            "/tmp/snap/src",
-            "--target-count",
-            "100",
-        ]);
-        assert!(result.is_err(), "expected missing --dest to fail");
-    }
-
-    #[test]
-    fn cli_snapshot_subset_requires_target_count() {
-        let result = Cli::try_parse_from([
-            "cli",
-            "snapshot-subset",
-            "--source",
-            "/tmp/snap/src",
-            "--dest",
-            "/tmp/snap/dst",
-        ]);
-        assert!(result.is_err(), "expected missing --target-count to fail");
     }
 }

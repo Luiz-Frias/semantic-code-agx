@@ -11,6 +11,10 @@ pub struct CodeChunk {
     pub content: Box<str>,
     /// Line span (1-indexed).
     pub span: LineSpan,
+    /// Optional byte offset of this fragment within the original line-span content.
+    pub fragment_start_byte: Option<u32>,
+    /// Optional exclusive byte offset of this fragment within the original line-span content.
+    pub fragment_end_byte: Option<u32>,
     /// Optional language hint.
     pub language: Option<Language>,
     /// Optional file path hint.

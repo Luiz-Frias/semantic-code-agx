@@ -17,8 +17,11 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::{Mutex, Notify, oneshot};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{Mutex, oneshot};
+use tokio_util::sync::{
+    CancellationToken as TokioCancellationToken, DropGuard as TokioCancellationDropGuard,
+};
 
 /// A correlation identifier used for logging/telemetry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -76,13 +79,23 @@ fn next_scoped_id(counter: &AtomicU64, prefix: &'static str) -> CorrelationId {
 /// A clonable cancellation token that can be awaited.
 #[derive(Debug, Clone)]
 pub struct CancellationToken {
-    inner: Arc<CancellationState>,
+    inner: TokioCancellationToken,
 }
 
+/// Owned drop guard that cancels the token on drop unless disarmed.
 #[derive(Debug)]
-struct CancellationState {
-    cancelled: AtomicBool,
-    notify: Notify,
+pub struct CancellationDropGuard {
+    inner: TokioCancellationDropGuard,
+}
+
+impl CancellationDropGuard {
+    /// Disable automatic cancellation and return the wrapped token.
+    #[must_use]
+    pub fn disarm(self) -> CancellationToken {
+        CancellationToken {
+            inner: self.inner.disarm(),
+        }
+    }
 }
 
 impl CancellationToken {
@@ -90,43 +103,56 @@ impl CancellationToken {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(CancellationState {
-                cancelled: AtomicBool::new(false),
-                notify: Notify::new(),
-            }),
+            inner: TokioCancellationToken::new(),
+        }
+    }
+
+    /// Create a child token cancelled by its parent but not vice versa.
+    #[must_use]
+    pub fn child_token(&self) -> Self {
+        Self {
+            inner: self.inner.child_token(),
         }
     }
 
     /// Cancel the token and wake all current/future waiters.
     pub fn cancel(&self) {
-        let was_cancelled = self.inner.cancelled.swap(true, Ordering::SeqCst);
-        if !was_cancelled {
-            self.inner.notify.notify_waiters();
-        }
+        self.inner.cancel();
     }
 
     /// Returns true if the token has been cancelled.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.inner.cancelled.load(Ordering::SeqCst)
+        self.inner.is_cancelled()
     }
 
     /// Wait until the token is cancelled.
     pub async fn cancelled(&self) {
-        if self.is_cancelled() {
-            return;
-        }
+        self.inner.cancelled().await;
+    }
 
-        loop {
-            let notified = self.inner.notify.notified();
-            if self.is_cancelled() {
-                return;
-            }
-            notified.await;
-            if self.is_cancelled() {
-                return;
-            }
+    /// Cancel the token on drop unless the returned guard is disarmed.
+    #[must_use]
+    pub fn drop_guard(self) -> CancellationDropGuard {
+        CancellationDropGuard {
+            inner: self.inner.drop_guard(),
         }
+    }
+
+    /// Run a future until either it completes or this token is cancelled.
+    pub async fn run_until_cancelled<F>(&self, fut: F) -> Option<F::Output>
+    where
+        F: Future,
+    {
+        self.inner.run_until_cancelled(fut).await
+    }
+
+    /// Owned variant of [`Self::run_until_cancelled`].
+    pub async fn run_until_cancelled_owned<F>(self, fut: F) -> Option<F::Output>
+    where
+        F: Future,
+    {
+        self.inner.run_until_cancelled_owned(fut).await
     }
 }
 
@@ -711,6 +737,61 @@ mod tests {
         assert_eq!(second, 2);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_token_child_cancel_does_not_cancel_parent() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+
+        child.cancel();
+
+        assert!(child.is_cancelled());
+        assert!(!parent.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancellation_token_parent_cancel_propagates_to_child() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+
+        parent.cancel();
+        child.cancelled().await;
+
+        assert!(parent.is_cancelled());
+        assert!(child.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancellation_drop_guard_cancels_on_drop() {
+        let token = CancellationToken::new();
+        let child = token.child_token();
+        let guard = token.drop_guard();
+
+        drop(guard);
+        child.cancelled().await;
+
+        assert!(child.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn run_until_cancelled_returns_none_after_cancellation() {
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            canceller.cancel();
+        });
+
+        let result = token
+            .run_until_cancelled(async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                42
+            })
+            .await;
+
+        assert_eq!(result, None);
     }
 
     #[tokio::test]

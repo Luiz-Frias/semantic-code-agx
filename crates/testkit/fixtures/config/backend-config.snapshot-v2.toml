@@ -1,9 +1,0 @@
-version = 1
-
-[vectorDb]
-provider = "local"
-indexMode = "dense"
-snapshotStorage = "project"
-snapshotFormat = "v2"
-snapshotMaxBytes = 4194304
-experimentalU8Search = false

@@ -851,6 +851,8 @@ mod tests {
                     language: Some(Language::Rust),
                     file_extension: Some("rs".into()),
                     span,
+                    fragment_start_byte: None,
+                    fragment_end_byte: None,
                     node_kind: None,
                 },
             },

@@ -31,6 +31,8 @@ Kernel trait:
 
 - `VectorKernel::kind()`
 - `VectorKernel::search(...)`
+- `VectorKernel::search_with_config_override(...)`
+- `VectorKernel::set_snapshot_dir(...)`
 
 Current runtime behavior is build-dependent:
 
@@ -64,7 +66,7 @@ Mismatched versions return a `vector:snapshot_version_mismatch` error.
 For binary companion snapshots, v2 metadata + bundle read/write helpers live in
 `semantic_code_vector::snapshot`, including quantization metadata, CRC32
 integrity checks, and v1->v2 upgrade helpers. See
-[`docs/vector-snapshot-format.md`](../vector-snapshot-format.md).
+[Vector Snapshot Format](./vector-snapshot-format.md).
 
 Kernel metadata in v2 snapshots supports future kernel variants. Local adapter
 load validates snapshot kernel metadata against configured kernel and either
@@ -75,6 +77,14 @@ At the `VectorIndex` boundary, v2 persistence also writes an `ids.json` sidecar
 to preserve stable record IDs for dequantized reload. When loading v2 with
 auto-upgrade enabled, missing `ids.json` falls back to IDs from
 `snapshot.v1.json`.
+
+The trait-level `set_snapshot_dir()` hook lets a host adapter hand the
+collection `.v2/` directory to kernels that support private caches. In
+persistence-capable experimental DFRR builds, that hook is used to persist a
+`dfrr/` ready-state sidecar (graph, vectors, rank index, node mapping, and
+state metadata) and restore it on later processes. If the sidecar is missing,
+corrupt, or stale relative to node count/dimension, DFRR rebuilds from the
+loaded collection and rewrites the cache.
 
 ## Snapshot stats and limits
 
@@ -94,7 +104,7 @@ Oversize writes return `vector:snapshot_oversize`.
 that can be toggled at runtime by `vectorDb.experimentalU8Search`. This path is
 feature-gated and falls back to f32 search when disabled.
 
-See [`docs/vector-quantization.md`](../vector-quantization.md) for limits and
+See [Vector Quantization](./vector-quantization.md) for limits and
 usage guidance.
 
 ## Experimental hooks

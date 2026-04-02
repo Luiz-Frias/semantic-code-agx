@@ -224,10 +224,15 @@ pub fn run_search_stdin_batch(
     default_top_k: Option<u32>,
     default_threshold: Option<f32>,
     include_content: bool,
+    query_vectors_only: bool,
 ) -> Result<CliOutput, CliError> {
-    let session =
-        semantic_code_facade::open_search_session(config_path, overrides_json, codebase_root)
-            .map_err(|error| CliError::Io(io::Error::other(error.to_string())))?;
+    let session = semantic_code_facade::open_search_session_with_options(
+        config_path,
+        overrides_json,
+        codebase_root,
+        query_vectors_only,
+    )
+    .map_err(|error| CliError::Io(io::Error::other(error.to_string())))?;
 
     let vector_kernel = resolve_vector_kernel_metadata_std_env(config_path, overrides_json)
         .unwrap_or_else(|_| {

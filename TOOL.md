@@ -123,6 +123,16 @@ Vector DB override flags (used by `estimate-storage`, `index`, `search`, `clear`
 
 These are merged into runtime override JSON (`vectorDb.*`, `embedding.*`) before config loading.
 
+### `sca agent-doc [COMMAND]`
+
+- Preconditions: none.
+- Input:
+  - `COMMAND` (optional positional): scope output to a single command (e.g., `search`, `index`).
+- Output: **always YAML** regardless of `--output` or `--agent` flags.
+- Full invocation emits the complete AGX protocol spec: commands, NDJSON shapes, exit codes, recovery table, filter syntax, workflows.
+- Scoped invocation emits protocol header + the requested command contract + shared context.
+- Exit code: `0` on success, `2` if the scope argument is an unknown command name.
+
 ### `sca info`
 
 - Preconditions: none.
@@ -897,11 +907,17 @@ Vector DB:
 - `SCA_VECTOR_DB_USERNAME`
 - `SCA_VECTOR_DB_PASSWORD` (secret)
 
+DFRR BQ1 overrides:
+- `SCA_VECTOR_DB_DFRR_BQ1_THRESHOLD` — BQ1 threshold ratio (f64)
+- `SCA_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_SAMPLE_COUNT` — sample count for percentile-assist mode (u32)
+- `SCA_VECTOR_DB_DFRR_BQ1_PERCENTILE_ASSIST_TARGET_RANK` — target rank for percentile-assist mode (u32)
+
 Sync:
 - `SCA_SYNC_ALLOWED_EXTENSIONS`
 - `SCA_SYNC_IGNORE_PATTERNS`
 - `SCA_SYNC_MAX_FILES`
 - `SCA_SYNC_MAX_FILE_SIZE_BYTES`
+- `SCA_SYNC_MAX_CHUNKS`
 
 ### Validation Rules (selected bounds)
 
@@ -931,6 +947,7 @@ Sync:
 - `sync.maxFiles`: `1..=10000000`
 - `sync.maxFileSizeBytes`: `1..=100000000`
 - `sync.allowedExtensions` max entries: `128`
+- `sync.maxChunks`: `1..=10000000` (when set)
 - `sync.ignorePatterns` max entries: `512`
 
 ### Startup vs Runtime Failures
@@ -1016,9 +1033,10 @@ When wrapping in MCP tools:
 - `self-check` has no explicit NDJSON serializer branch.
 - Most operational commands require a local manifest; missing manifest is a hard invalid-input error.
 - With `snapshotStorage=disabled` and local provider, indexed state persistence across separate CLI processes is not guaranteed.
-- Cross-process strong consistency for concurrent index/search/clear is not guaranteed by explicit locks.
+- The collection loader actor serializes initialization but does not provide cross-process locking. Concurrent index/search/clear across separate processes may produce undefined results.
 - Performance SLOs for 1K/10K/100K file workloads are not encoded in code.
 - Hidden/internal commands (`jobs run`, `validate-request`, `self-check`) are implementation surfaces and may change more frequently.
+- DFRR BQ1 percentile-assist threshold mode requires a pre-built DFRR graph; it is not available during first-time indexing.
 
 <!-- TODO: add benchmark artifacts and stable SLO targets for command latency/throughput. -->
 <!-- TODO: expose a generated machine-readable schema package for all command outputs (JSON + NDJSON line variants). -->

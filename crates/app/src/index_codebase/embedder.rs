@@ -45,6 +45,7 @@ impl EmbedBatchTask {
             let latency_ms = u64::try_from(queued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
             telemetry.record_timer_ms("index.embed_batch.queue_latency_ms", latency_ms, None);
         }
+        stats.record_embed_queue_latency(queued_at.elapsed());
 
         let timer = telemetry
             .as_ref()
@@ -57,6 +58,7 @@ impl EmbedBatchTask {
             .collect::<Vec<_>>();
         let embed_started = Instant::now();
         let vectors = embedding.embed_batch(&request_ctx, texts.into()).await?;
+        stats.record_provider_embed_batch(embed_started.elapsed());
 
         if let Some(timer) = timer.as_ref() {
             timer.stop();
@@ -69,7 +71,6 @@ impl EmbedBatchTask {
                 ErrorClass::NonRetriable,
             ));
         }
-
         stats.record_embed(batch_len, embed_started.elapsed());
 
         if let Some(telemetry) = telemetry.as_ref() {
@@ -77,14 +78,20 @@ impl EmbedBatchTask {
             telemetry.increment_counter("index.embed_batch.items", count, None);
         }
 
+        let build_started = Instant::now();
         let mut documents = Vec::with_capacity(batch.len());
         for (chunk, vector) in batch.into_iter().zip(vectors) {
-            let chunk_id = derive_chunk_id(&ChunkIdInput::new(
+            let mut chunk_id_input = ChunkIdInput::new(
                 chunk.relative_path.clone(),
                 chunk.span,
                 chunk.content.clone().into_inner(),
-            ))
-            .map_err(ErrorEnvelope::from)?;
+            );
+            if let (Some(start_byte), Some(end_byte)) =
+                (chunk.fragment_start_byte, chunk.fragment_end_byte)
+            {
+                chunk_id_input = chunk_id_input.with_fragment_bytes(start_byte, end_byte);
+            }
+            let chunk_id = derive_chunk_id(&chunk_id_input).map_err(ErrorEnvelope::from)?;
 
             documents.push(VectorDocumentForInsert {
                 id: chunk_id.into_inner(),
@@ -95,10 +102,13 @@ impl EmbedBatchTask {
                     language: Some(chunk.language),
                     file_extension: chunk.file_extension,
                     span: chunk.span,
+                    fragment_start_byte: chunk.fragment_start_byte,
+                    fragment_end_byte: chunk.fragment_end_byte,
                     node_kind: None,
                 },
             });
         }
+        stats.record_build_insert_documents(build_started.elapsed());
 
         Ok(EmbeddedBatch { documents })
     }
@@ -196,6 +206,7 @@ pub(super) async fn drain_one_embedding_batch<'a>(
         ));
     };
 
+    let wait_started = Instant::now();
     let embedded = match task.as_mut().await {
         Ok(embedded) => embedded,
         Err(error) => {
@@ -220,6 +231,8 @@ pub(super) async fn drain_one_embedding_batch<'a>(
             ));
         },
     };
+    ctx.stats
+        .record_await_embedding_task(wait_started.elapsed());
 
     schedule_insert_batch(ctx, state, embedded);
     drain_insert_batches_for_backpressure(ctx, state).await?;

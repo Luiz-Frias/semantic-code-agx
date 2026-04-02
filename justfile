@@ -1,5 +1,5 @@
 # =============================================================================
-# JUSTFILE - semantic-code-agx
+# JUSTFILE - semantic-code-agents-rs
 # =============================================================================
 # CI-focused task runner. Local dev workflows are in justfile.local.
 # Run `just` or `just --list` to see available commands.
@@ -25,7 +25,7 @@ check: fmt-check clippy test-unit
     @echo "✓ All quality checks passed"
 
 # Run all checks including slow ones (used by pre-push)
-check-all: check test-all deny audit
+check-all: check test-all proof deny audit
     @echo "✓ All pre-push checks passed"
 
 # Format check (no modifications)
@@ -74,6 +74,30 @@ test-all:
     cargo nextest run --workspace --all-targets
     cargo test --workspace --doc
 
+# Run trybuild proof lane checks.
+test-trybuild:
+    @echo "→ Running trybuild proof lane..."
+    scripts/test-with-dev-env.sh cargo test -p semantic-code-ports --test lend_sealed_trybuild --all-features
+
+# Install miri sysroot for the pinned nightly.
+miri-setup:
+    @echo "→ Setting up miri for the pinned toolchain..."
+    scripts/test-with-dev-env.sh cargo miri setup
+
+# Run miri proof lane checks.
+test-miri: miri-setup
+    @echo "→ Running miri proof lane..."
+    scripts/test-with-dev-env.sh cargo miri test -p semantic-code-ports --test miri_ports_smoke --all-features
+
+# Run loom proof lane checks.
+test-loom:
+    @echo "→ Running loom proof lane..."
+    scripts/test-with-dev-env.sh bash -c 'LOOM_MAX_PREEMPTIONS="${LOOM_MAX_PREEMPTIONS:-2}" cargo test -p semantic-code-shared --features loom-tests --test loom_once_init -- --nocapture'
+
+# Run all proof lanes in one command.
+proof: test-trybuild test-miri test-loom
+    @echo "✓ All proof lanes passed"
+
 # =============================================================================
 # SECURITY & DEPENDENCIES
 # =============================================================================
@@ -102,6 +126,11 @@ build-release:
     @echo "→ Building release..."
     cargo build --workspace --release
 
+# Build with Profile-Guided Optimization (PGO)
+build-pgo:
+    @echo "→ Building with PGO..."
+    scripts/pgo-build.sh
+
 # =============================================================================
 # DOCUMENTATION
 # =============================================================================
@@ -109,6 +138,11 @@ build-release:
 # Build documentation without opening
 doc-build:
     cargo doc --workspace --no-deps
+
+# Build a risk-driven architecture assurance toolkit for the current repo or
+# any explicitly passed sibling repos.
+arch-toolkit *args:
+    python3 scripts/build-arch-toolkit.py {{args}}
 
 # =============================================================================
 # CI/CD

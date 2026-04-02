@@ -723,6 +723,8 @@ impl SplitterPort for SelfCheckSplitter {
             Ok(vec![CodeChunk {
                 content: code,
                 span,
+                fragment_start_byte: None,
+                fragment_end_byte: None,
                 language: Some(language),
                 file_path: options.file_path,
             }])

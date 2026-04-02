@@ -130,3 +130,9 @@ Hexagonal design introduces more files and indirection than a monolith. That cos
 - Long-lived CLI tooling
 - Multiple provider backends
 - A growing set of integration surfaces
+
+## Related
+
+- [Architecture Overview](./README.md)
+- [Crate Map](./crate-map.md) -- Dependency graph
+- [ADR-0001: Hexagonal Architecture](../adrs/0001-hexagonal-architecture.md) -- Decision rationale

@@ -77,7 +77,7 @@ impl SpawnFileTaskContext {
             stats,
         } = self;
 
-        let mut split_timer = SplitStatsGuard::new(stats);
+        let mut split_timer = SplitStatsGuard::new(Arc::clone(&stats));
         request_ctx.ensure_not_cancelled("index_codebase.file_task")?;
 
         if !file_passes_size_check(
@@ -86,14 +86,21 @@ impl SpawnFileTaskContext {
             &codebase_root,
             &safe_file,
             max_file_size_bytes,
+            stats.as_ref(),
         )
         .await?
         {
             return Ok(FileResult::Skipped);
         }
 
-        let Some(code) =
-            read_file_text_or_skip(&request_ctx, &deps, &codebase_root, &safe_file).await?
+        let Some(code) = read_file_text_or_skip(
+            &request_ctx,
+            &deps,
+            &codebase_root,
+            &safe_file,
+            stats.as_ref(),
+        )
+        .await?
         else {
             return Ok(FileResult::Skipped);
         };
@@ -101,8 +108,15 @@ impl SpawnFileTaskContext {
         let ext = file_extension_of(relative_path.as_ref());
         let language = language_from_extension(ext.as_deref());
 
-        let Some(chunks) =
-            split_file_or_skip(&request_ctx, &deps, code, language, relative_path.as_ref()).await?
+        let Some(chunks) = split_file_or_skip(
+            &request_ctx,
+            &deps,
+            code,
+            language,
+            relative_path.as_ref(),
+            stats.as_ref(),
+        )
+        .await?
         else {
             return Ok(FileResult::Skipped);
         };
@@ -146,8 +160,11 @@ async fn file_passes_size_check(
     codebase_root: &Path,
     safe_file: &semantic_code_ports::SafeRelativePath,
     max_file_size_bytes: Option<u64>,
+    stats: &IndexStageStatsCollector,
 ) -> Result<bool> {
+    let started = Instant::now();
     let Some(max_file_size_bytes) = max_file_size_bytes else {
+        stats.record_split_file_passes_size_check(started.elapsed());
         return Ok(true);
     };
 
@@ -186,6 +203,7 @@ async fn file_passes_size_check(
         },
     }
 
+    stats.record_split_file_passes_size_check(started.elapsed());
     Ok(true)
 }
 
@@ -194,13 +212,18 @@ async fn read_file_text_or_skip(
     deps: &super::types::IndexCodebaseDeps,
     codebase_root: &Path,
     safe_file: &semantic_code_ports::SafeRelativePath,
+    stats: &IndexStageStatsCollector,
 ) -> Result<Option<Box<str>>> {
+    let started = Instant::now();
     match deps
         .filesystem
         .read_file_text(ctx, codebase_root.to_path_buf(), safe_file.clone())
         .await
     {
-        Ok(code) => Ok(Some(code)),
+        Ok(code) => {
+            stats.record_split_read_file_text_or_skip(started.elapsed());
+            Ok(Some(code))
+        },
         Err(error) => {
             if error.is_cancelled() {
                 return Err(error);
@@ -212,6 +235,7 @@ async fn read_file_text_or_skip(
                     None,
                 );
             }
+            stats.record_split_read_file_text_or_skip(started.elapsed());
             Ok(None)
         },
     }
@@ -223,7 +247,9 @@ async fn split_file_or_skip(
     code: Box<str>,
     language: Language,
     file_path: &str,
+    stats: &IndexStageStatsCollector,
 ) -> Result<Option<Vec<CodeChunk>>> {
+    let started = Instant::now();
     match deps
         .splitter
         .split(
@@ -236,7 +262,10 @@ async fn split_file_or_skip(
         )
         .await
     {
-        Ok(chunks) => Ok(Some(chunks)),
+        Ok(chunks) => {
+            stats.record_split_file_or_skip(started.elapsed());
+            Ok(Some(chunks))
+        },
         Err(error) => {
             if error.is_cancelled() {
                 return Err(error);
@@ -248,6 +277,7 @@ async fn split_file_or_skip(
                     None,
                 );
             }
+            stats.record_split_file_or_skip(started.elapsed());
             Ok(None)
         },
     }

@@ -1,7 +1,7 @@
 # =============================================================================
 # CARGO CONFIGURATION
 # =============================================================================
-# Build settings and rustflags for the semantic-code-agx workspace.
+# Build settings and rustflags for the semantic-code-agents-rs workspace.
 # Docs: https://doc.rust-lang.org/cargo/reference/config.html
 # =============================================================================
 
@@ -121,8 +121,6 @@ git-fetch-with-cli = true
 # =============================================================================
 # LINKING - Platform-specific linker optimization
 # =============================================================================
-# mold is Linux-only; macOS uses lld via clang's -fuse-ld flag
-
 # macOS uses the system linker (ld-prime); lld via -fuse-ld requires
 # LLVM's clang which isn't available on GH Actions macOS runners.
 # Local dev can override via CARGO_TARGET_*_LINKER env vars if desired.

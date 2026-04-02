@@ -54,15 +54,32 @@ When `snapshotFormat = "v2"`, companions are written under:
   snapshot.meta
   vectors.u8.bin
   ids.json
+  records.meta.jsonl
+  dfrr/                       # DFRR kernel only; requires a persistence-capable kernel build
+    manifest.json
+    graph.bin
+    vectors.bin
+    binary_vectors.bin
+    rank_index.json
+    node_to_id.json
+    dfrr_state.json
 ```
 
 Load behavior for `snapshotFormat = "v2"`:
 
-- If both companion files exist, local DB loads vectors from v2 bundle and
-  validates snapshot kernel metadata against configured kernel.
+- If `records.meta.jsonl` exists and the base v2 bundle is present, local DB
+  loads vectors from the v2 bundle, loads document metadata from the JSONL
+  sidecar, and validates snapshot kernel metadata against the configured
+  kernel.
 - If neither exists, local DB falls back to v1 JSON and migrates to v2 on load.
 - If only one companion exists, load fails with
   `vector:snapshot_missing_companion`.
+- When the active kernel is DFRR and the linked kernel build supports
+  ready-state persistence, `dfrr/` is used as a kernel-private restore cache
+  after the collection loads.
+- If that DFRR `dfrr/` cache is missing, stale (node count/dimension
+  mismatch), or invalid, the kernel rebuilds from the loaded collection and
+  rewrites the cache non-fatally.
 
 Kernel metadata mismatch behavior (`snapshot.meta` vs configured kernel):
 
@@ -89,6 +106,9 @@ Snapshot v2 metadata constants are now defined in
 - `vectors.u8.bin` (quantized vector payload + CRC32 integrity checksum)
 - `graph.u32.bin` (graph payload, reserved for upcoming milestones)
 - metadata includes `kernel` (default: `hnsw-rs`; additional variants available via optional dependencies)
+
+Kernel-private DFRR cache files live under `dfrr/` and are not part of the
+base `semantic_code_vector::snapshot` contract.
 
 The vector crate also provides `upgrade_v1_to_v2` and optional auto-upgrade
 loading (`ReadSnapshotV2Options { auto_upgrade_v1: true }`) for migrating

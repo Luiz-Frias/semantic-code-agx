@@ -32,7 +32,7 @@ md5.workspace = true
 uuid.workspace = true
 fs2.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
-semantic-code-dfrr-hnsw = { workspace = true, optional = true }
+# semantic-code-dfrr-hnsw = { workspace = true, optional = true }  # Private dep
 rusqlite.workspace = true
 
 [dev-dependencies]
@@ -41,8 +41,5 @@ rusqlite.workspace = true
 default = []
 milvus-rest = ["semantic-code-adapters/milvus-rest"]
 milvus-grpc = ["semantic-code-adapters/milvus-grpc"]
-experimental-dfrr-kernel = [
-  "dep:semantic-code-dfrr-hnsw",
-  "semantic-code-adapters/experimental-dfrr-kernel",
-]
-ane = ["semantic-code-adapters/ane"]
+experimental-dfrr-kernel = ["semantic-code-adapters/experimental-dfrr-kernel"]  # Stub — no private dep wired
+ane = ["semantic-code-adapters/ane"]  # Stub — no private dep wired

@@ -13,9 +13,10 @@ pub use change_detector::{
     delete_modified_files, delete_removed_files, detect_changes, emit_progress, total_changes,
 };
 pub use types::{
-    EmbedStageStats, IndexCodebaseDeps, IndexCodebaseInput, IndexCodebaseOutput,
-    IndexCodebaseStatus, IndexProgress, IndexStageStats, InsertStageStats, ScanStageStats,
-    SplitStageStats,
+    EmbedFunctionStats, EmbedStageStats, FunctionTimingStats, IndexCodebaseDeps,
+    IndexCodebaseInput, IndexCodebaseOutput, IndexCodebaseStatus, IndexProgress, IndexStageStats,
+    InsertFunctionStats, InsertStageStats, PrepareFunctionStats, PrepareStageStats,
+    ScanFunctionStats, ScanStageStats, SplitFunctionStats, SplitStageStats,
 };
 
 use crate::generated::IndexPipelineState;
@@ -215,12 +216,14 @@ pub async fn index_codebase(
     let stats = Arc::new(IndexStageStatsCollector::new());
 
     progress.emit("Preparing collection...", 0, 100, Some(0));
-    ensure_collection(ctx, deps, &input).await?;
+    let prepare_started = Instant::now();
+    ensure_collection(ctx, deps, &input, stats.as_ref()).await?;
+    stats.record_prepare(prepare_started.elapsed());
     tracing::debug!("index collection prepared");
 
     progress.emit("Scanning files...", 0, 100, Some(5));
     let scan_started = Instant::now();
-    let files = scanner::load_index_files(ctx, deps, &input).await?;
+    let files = scanner::load_index_files(ctx, deps, &input, &stats).await?;
     tracing::debug!(file_count = files.len(), "index scan completed");
     stats.record_scan(
         u64::try_from(files.len()).unwrap_or(u64::MAX),
@@ -297,7 +300,10 @@ async fn process_files<'a>(
                 ErrorClass::NonRetriable,
             )
         })?;
+        let file_wait_started = Instant::now();
         let result = task.await?;
+        ctx.stats
+            .record_await_file_task(file_wait_started.elapsed());
 
         if state.total_chunks >= ctx.limits.chunk_limit.get() {
             state.status = IndexCodebaseStatus::LimitReached;
@@ -330,6 +336,8 @@ async fn process_files<'a>(
             state.batch.pending.push(PendingChunk {
                 relative_path: relative_path.clone(),
                 span: chunk.span,
+                fragment_start_byte: chunk.fragment_start_byte,
+                fragment_end_byte: chunk.fragment_end_byte,
                 language: chunk.language.unwrap_or(language),
                 content,
                 file_extension: file_extension_of(relative_path.as_ref()),
@@ -407,27 +415,35 @@ async fn ensure_collection(
     ctx: &RequestContext,
     deps: &IndexCodebaseDeps,
     input: &IndexCodebaseInput,
+    stats: &IndexStageStatsCollector,
 ) -> Result<()> {
+    let has_collection_started = Instant::now();
     let exists = deps
         .vectordb
         .has_collection(ctx, input.collection_name.clone())
         .await?;
+    stats.record_prepare_has_collection(has_collection_started.elapsed());
 
     if exists && input.force_reindex {
+        let drop_started = Instant::now();
         deps.vectordb
             .drop_collection(ctx, input.collection_name.clone())
             .await?;
+        stats.record_prepare_drop_collection(drop_started.elapsed());
     }
 
     if exists && !input.force_reindex {
         return Ok(());
     }
 
+    let detect_started = Instant::now();
     let dimension = deps
         .embedding
         .detect_dimension(ctx, DetectDimensionOptions::default().into())
         .await?;
+    stats.record_prepare_detect_dimension(detect_started.elapsed());
 
+    let create_started = Instant::now();
     match input.index_mode {
         IndexMode::Hybrid => {
             deps.vectordb
@@ -440,6 +456,7 @@ async fn ensure_collection(
                 .await?;
         },
     }
+    stats.record_prepare_create_collection(create_started.elapsed());
 
     Ok(())
 }
@@ -693,6 +710,8 @@ mod tests {
                     out.push(CodeChunk {
                         content: format!("{language}:{index}:{code}").into_boxed_str(),
                         span,
+                        fragment_start_byte: None,
+                        fragment_end_byte: None,
                         language: Some(language),
                         file_path: options.file_path.clone(),
                     });

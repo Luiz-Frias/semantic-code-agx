@@ -30,9 +30,10 @@ pub use calibrate_bq1::{
 pub use clear_index::{ClearIndexDeps, ClearIndexInput, clear_index};
 pub use generated::{INDEX_PIPELINE_STATES, INDEX_PIPELINE_TRANSITIONS, IndexPipelineState};
 pub use index_codebase::{
-    EmbedStageStats, IndexCodebaseDeps, IndexCodebaseInput, IndexCodebaseOutput,
-    IndexCodebaseStatus, IndexProgress, IndexStageStats, InsertStageStats, ScanStageStats,
-    SplitStageStats, index_codebase,
+    EmbedFunctionStats, EmbedStageStats, FunctionTimingStats, IndexCodebaseDeps,
+    IndexCodebaseInput, IndexCodebaseOutput, IndexCodebaseStatus, IndexProgress, IndexStageStats,
+    InsertFunctionStats, InsertStageStats, PrepareFunctionStats, PrepareStageStats,
+    ScanFunctionStats, ScanStageStats, SplitFunctionStats, SplitStageStats, index_codebase,
 };
 pub use placeholder::app_crate_version;
 pub use reindex_by_change::{

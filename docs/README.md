@@ -1,113 +1,93 @@
 # Documentation
 
-Welcome to the semantic-code-agents-rs documentation. This guide will help you navigate the project's documentation and find what you need.
+Welcome to the **semantic-code-agents-rs** documentation -- a CLI-first semantic code search engine in Rust.
 
-## Quick Navigation
+## Quick Links
 
-### Getting Started
-- **[Getting Started](./GETTING_STARTED.md)** - Install and run your first search in 5 minutes
-- **[Release & Install](./release.md)** - Release artifacts and install methods
-- **[Troubleshooting](./TROUBLESHOOTING.md)** - Common issues and solutions
-- **[FAQ](./FAQ.md)** - Frequently asked questions
-
-### Architecture & Design
-- **[Architecture Overview](./architecture/README.md)** - System architecture and design principles
-- **[Hexagonal Architecture](./architecture/hexagonal.md)** - Ports and adapters pattern
-- **[Crate Map](./architecture/crate-map.md)** - Crate organization and dependencies
-- **[Data Flow](./architecture/data-flow.md)** - Request lifecycle and sequence diagrams
-
-### User Guides
-- **[Indexing Guide](./guides/indexing.md)** - How to index a codebase
-- **[Searching Guide](./guides/searching.md)** - How to perform semantic searches
-- **[Configuration Guide](./guides/configuration.md)** - Configuration deep-dive
-- **[Embedding Providers](./guides/embedding-providers.md)** - Setting up embedding services
-
-### Reference
-- **[REST API Reference](./reference/api-v1.md)** - API v1 endpoints and schemas
-- **[CLI Reference](./reference/cli.md)** - Command-line interface
-- **[CLI Usage](./reference/cli-usage.md)** - End-to-end CLI flows
-- **[CLI Commands](./reference/cli-commands.md)** - Command summary + flags
-- **[Agent Usage](./reference/agent-usage.md)** - Agent-friendly CLI patterns
-- **[Configuration Reference](./reference/config-schema.md)** - Configuration schema
-- **[Environment Variables](./reference/env-vars.md)** - Available env vars
-- **[Error Codes](./reference/error-codes.md)** - Error codes and meanings
-- **[Port Traits](./reference/ports.md)** - Port interface definitions
-- **[Observability](./observability.md)** - Structured logs, telemetry, and sampling
-- **[Security](./security.md)** - Path policy, state dirs, and redaction rules
-
-### For Developers
-- **[Contributing](../CONTRIBUTING.md)** - How to contribute to the project
-- **[Architecture Decision Records](./adrs/README.md)** - Why key decisions were made
-- **[Internals](./internals/)** - Deep-dive into implementation details:
-  - [Embedding Adapters](./internals/adapters/embedding.md)
-  - [Vector Database Adapters](./internals/adapters/vectordb.md)
-  - [Filesystem Adapter](./internals/adapters/filesystem.md)
-  - [Code Splitter](./internals/splitter.md)
-  - [Vector Kernel](./internals/vector-kernel.md)
-  - [Vector Snapshot Format v2](./vector-snapshot-format.md)
-  - [mmap Safety Invariants](./mmap-safety.md)
-  - [Resilience Patterns](./internals/resilience.md)
-  - [Concurrency](./internals/concurrency.md)
-  - [Request Validation](./internals/validation.md)
-
-### Project
-- **[Changelog](../CHANGELOG.md)** - Version history and changes
-- **[Security Policy](../SECURITY.md)** - How to report security vulnerabilities
-- **[Code of Conduct](../CODE_OF_CONDUCT.md)** - Community guidelines
-- **[License](../LICENSE)** - Dual MIT/Apache-2.0 license
-
-## Documentation Structure
-
-This documentation follows the [Diataxis framework](https://diataxis.fr/), organizing content into four categories:
-
-### 📚 Tutorials (Getting Started)
-Step-by-step guides for newcomers. Start here if you're new to the project.
-
-### 🎯 How-To Guides (Guides)
-Practical instructions for specific tasks like indexing or configuration.
-
-### 📖 Reference (Reference)
-Complete API documentation, schemas, and specifications.
-
-### 💡 Explanation (Architecture)
-Conceptual documentation explaining design decisions and architecture.
-
-## Finding Information
-
-**I want to...**
-- **...get started quickly** → [Getting Started](./GETTING_STARTED.md)
-- **...understand the architecture** → [Architecture Overview](./architecture/README.md)
-- **...index my codebase** → [Indexing Guide](./guides/indexing.md)
-- **...search semantically** → [Searching Guide](./guides/searching.md)
-- **...solve a problem** → [Troubleshooting](./TROUBLESHOOTING.md)
-- **...find an API endpoint** → [REST API Reference](./reference/api-v1.md)
-- **...configure the system** → [Configuration Guide](./guides/configuration.md)
-- **...contribute code** → [Contributing](../CONTRIBUTING.md)
-- **...understand a design decision** → [ADRs](./adrs/README.md)
-
-## Conventions
-
-### Code Examples
-Code examples show the most common usage patterns. For complete examples, see:
-- **CLI examples** in [CLI Reference](./reference/cli.md)
-- **Agent workflows** in [Agent Usage](./reference/agent-usage.md)
-- **API examples** in [REST API Reference](./reference/api-v1.md)
-- **Configuration examples** in [Configuration Reference](./reference/config-schema.md)
-
-### Links
-- Internal documentation links use relative paths: `[Link](./path/to/doc.md)`
-- External links show the full URL: `https://example.com/page`
-
-## Feedback
-
-- **Found a bug in the docs?** Open an issue on GitHub
-- **Want to improve a guide?** See [Contributing](../CONTRIBUTING.md)
-- **Have a question?** Check [FAQ](./FAQ.md) or open a discussion
-
-## Latest Changes
-
-See [CHANGELOG](../CHANGELOG.md) for recent updates and new features.
+| I want to... | Go to |
+|---|---|
+| Get started in 5 minutes | [Getting Started](./getting-started.md) |
+| Index my codebase | [Indexing Guide](./guides/indexing.md) |
+| Search semantically | [Searching Guide](./guides/searching.md) |
+| Understand the architecture | [Architecture Overview](./architecture/README.md) |
+| Look up a CLI command | [CLI Reference](./reference/cli.md) |
+| Configure the system | [Configuration Guide](./guides/configuration.md) |
+| Solve a problem | [Troubleshooting](./troubleshooting.md) |
+| Understand a design decision | [ADRs](./adrs/README.md) |
+| Contribute code | [Contributing](../CONTRIBUTING.md) |
 
 ---
 
-**Last updated**: February 2026
+## Getting Started
+
+- [Getting Started](./getting-started.md) -- Install and run your first search in 5 minutes
+- [Release & Install](./release.md) -- Release artifacts and install methods
+- [FAQ](./faq.md) -- Frequently asked questions
+- [Troubleshooting](./troubleshooting.md) -- Common issues and solutions
+
+## Guides
+
+How-to instructions for specific tasks.
+
+- [Configuration](./guides/configuration.md) -- Config sources, format, profiles, and validation
+- [Embedding Providers](./guides/embedding-providers.md) -- Setup for ONNX, OpenAI, Gemini, Voyage, Ollama
+- [Indexing](./guides/indexing.md) -- Full indexing, incremental reindex, and index management
+- [Searching](./guides/searching.md) -- Semantic search, query writing, and result interpretation
+- [Profile-Guided Optimization](./guides/pgo.md) -- PGO build pipeline for 10-20% throughput gains
+
+## Reference
+
+Exact specifications and API contracts.
+
+- [CLI Reference](./reference/cli.md) -- Commands, flags, output formats, agent integration
+- [Config Schema](./reference/config-schema.md) -- Full validated configuration schema
+- [Environment Variables](./reference/env-vars.md) -- All `SCA_*` env vars and provider overrides
+- [Error Codes](./reference/error-codes.md) -- Error envelope structure, kinds, and retry policy
+- [API v1 Contract](./reference/api-v1.md) -- DTO overview, error mapping, and redaction policy
+- [Port Traits](./reference/ports.md) -- Boundary contracts for adapters
+
+## Architecture
+
+System design and design rationale.
+
+- [Architecture Overview](./architecture/README.md) -- Hexagonal design, crate map summary, data flow
+- [Hexagonal Architecture](./architecture/hexagonal.md) -- Ports and adapters pattern deep-dive
+- [Crate Map](./architecture/crate-map.md) -- Workspace structure and full dependency graph
+- [Data Flow](./architecture/data-flow.md) -- Sequence diagrams for index, search, reindex, error, and config flows
+- [Collection Loader Actor](./architecture/collection-loader-actor.md) -- Actor-based collection lifecycle (replaces OnceCell)
+- [DFRR Design](./architecture/dfrr-design.md) -- Incremental maintenance and curvature-guided algorithms
+- [Advanced Patterns](./architecture/patterns.md) -- FSM, GAT, and typestate refactoring opportunities
+- [ADRs](./adrs/README.md) -- Architecture Decision Records
+
+## Internals
+
+Deep implementation details for contributors and curious readers.
+
+- [Vector Kernel](./internals/vector-kernel.md) -- Kernel dispatch, HNSW params, snapshot format plumbing
+- [Local Index](./internals/local-index.md) -- Persistence modes, snapshot loading, kernel metadata, filters
+- [Splitter](./internals/splitter.md) -- Tree-sitter chunking, supported languages, fallback behavior
+- [Concurrency](./internals/concurrency.md) -- CancellationToken, BoundedQueue, WorkerPool, performance knobs
+- [File Sync](./internals/file-sync.md) -- Merkle DAG change detection for incremental reindex
+- [Resilience](./internals/resilience.md) -- Embedding cache, retry policy, timeouts, telemetry counters
+- [Validation](./internals/validation.md) -- Request DTOs, filter expression grammar, ownership matrix
+- [Ignore Policy](./internals/ignore-policy.md) -- Pattern normalization, matching semantics, .contextignore
+- [mmap Safety](./internals/mmap-safety.md) -- Safety invariants for read-only memory mapping
+- [Vector Snapshot Format](./internals/vector-snapshot-format.md) -- v2 bundle layout, integrity checks, DFRR sidecar
+- [Vector Quantization](./internals/vector-quantization.md) -- SQ8 quantization and experimental u8 search path
+- [Observability](./internals/observability.md) -- Structured JSON logs, telemetry, tracing, and sampling
+
+## Research
+
+Design explorations and analysis reports.
+
+- [DFRR Mutation & Concurrency](./research/dfrr-mutation-concurrency.md) -- Static analysis of DFRR kernel mutation and concurrency model
+
+## Project
+
+- [Security](./security.md) -- Path policy, state directories, log redaction
+- [Release & Install](./release.md) -- Artifacts, verification, install methods, maintainer notes
+- [Changelog](../CHANGELOG.md) -- Version history
+- [Contributing](../CONTRIBUTING.md) -- How to contribute
+- [Security Policy](../SECURITY.md) -- Reporting vulnerabilities
+- [Code of Conduct](../CODE_OF_CONDUCT.md) -- Community guidelines
+- [License](../LICENSE) -- Dual MIT/Apache-2.0

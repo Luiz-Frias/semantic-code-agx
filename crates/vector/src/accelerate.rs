@@ -16,6 +16,7 @@
 
 #[cfg(all(target_os = "macos", feature = "accelerate", not(miri)))]
 use libc::c_int;
+use std::cell::Cell;
 
 #[cfg(all(target_os = "macos", feature = "accelerate", not(miri)))]
 #[link(name = "Accelerate", kind = "framework")]
@@ -71,6 +72,56 @@ fn dot_f32_scalar(a: &[f32], b: &[f32], len: usize) -> f32 {
     acc
 }
 
+thread_local! {
+    static DISTANCE_EVAL_TRACKING_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static DISTANCE_EVAL_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+struct DistanceEvalTrackingGuard {
+    start_count: u64,
+}
+
+impl DistanceEvalTrackingGuard {
+    fn begin() -> Self {
+        let start_count = DISTANCE_EVAL_COUNT.with(Cell::get);
+        DISTANCE_EVAL_TRACKING_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_add(1));
+        });
+        Self { start_count }
+    }
+
+    fn count(&self) -> u64 {
+        DISTANCE_EVAL_COUNT.with(|count| count.get().saturating_sub(self.start_count))
+    }
+}
+
+impl Drop for DistanceEvalTrackingGuard {
+    fn drop(&mut self) {
+        DISTANCE_EVAL_TRACKING_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
+
+#[inline]
+fn record_distance_evaluation() {
+    DISTANCE_EVAL_TRACKING_DEPTH.with(|depth| {
+        if depth.get() == 0 {
+            return;
+        }
+        DISTANCE_EVAL_COUNT.with(|count| {
+            count.set(count.get().saturating_add(1));
+        });
+    });
+}
+
+pub fn with_distance_eval_tracking<T>(f: impl FnOnce() -> T) -> (T, u64) {
+    let guard = DistanceEvalTrackingGuard::begin();
+    let result = f();
+    let count = guard.count();
+    (result, count)
+}
+
 /// Accelerate-backed cosine distance metric for `hnsw_rs`.
 ///
 /// Drop-in replacement for `hnsw_rs::prelude::DistCosine` that uses Apple
@@ -82,6 +133,8 @@ pub struct DistAccelerateCosine;
 
 impl hnsw_rs::prelude::Distance<f32> for DistAccelerateCosine {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        record_distance_evaluation();
+
         #[cfg(all(target_os = "macos", feature = "accelerate", not(miri)))]
         {
             let dot = dot_f32(va, vb);
@@ -112,7 +165,7 @@ impl hnsw_rs::prelude::Distance<f32> for DistAccelerateCosine {
 
 #[cfg(test)]
 mod tests {
-    use super::{DistAccelerateCosine, dot_f32, sum_squares_f32};
+    use super::{DistAccelerateCosine, dot_f32, sum_squares_f32, with_distance_eval_tracking};
     use hnsw_rs::prelude::Distance;
 
     #[test]
@@ -179,5 +232,20 @@ mod tests {
             (dist - 1.0).abs() < 1e-6,
             "zero vector should yield distance 1.0, got {dist}"
         );
+    }
+
+    #[test]
+    fn distance_eval_tracking_counts_cosine_calls() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+        let c = vec![7.0, 8.0, 9.0];
+
+        let (_, count) = with_distance_eval_tracking(|| {
+            let first = DistAccelerateCosine.eval(&a, &b);
+            let second = DistAccelerateCosine.eval(&a, &c);
+            first + second
+        });
+
+        assert_eq!(count, 2);
     }
 }

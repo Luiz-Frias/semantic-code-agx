@@ -90,7 +90,7 @@ Choose ONNX unless you need higher quality.
 3. Run `semantic-code-agents index`
 4. Run `semantic-code-agents search "your query"`
 
-See [Getting Started](./GETTING_STARTED.md).
+See [Getting Started](./getting-started.md).
 
 ### Can I use Milvus instead of local index?
 
@@ -222,20 +222,20 @@ Yes! It's dual-licensed MIT/Apache-2.0, so you can use it in commercial products
 
 ### My search is slow
 
-See [Troubleshooting: Performance Issues](./TROUBLESHOOTING.md#performance-issues).
+See [Troubleshooting: Performance Issues](./troubleshooting.md#performance-issues).
 
 ### I get "API key not found"
 
-See [Troubleshooting: Configuration Issues](./TROUBLESHOOTING.md#api-key-not-found).
+See [Troubleshooting: Configuration Issues](./troubleshooting.md#api-key-not-found).
 
 ### Index is using too much memory
 
-See [Troubleshooting: Out of Memory](./TROUBLESHOOTING.md#out-of-memory-error).
+See [Troubleshooting: Out of Memory](./troubleshooting.md#out-of-memory-error).
 
 ### Nothing seems to work
 
-1. Check [Getting Started](./GETTING_STARTED.md) - start fresh
-2. Check [Troubleshooting](./TROUBLESHOOTING.md) - common issues
+1. Check [Getting Started](./getting-started.md) - start fresh
+2. Check [Troubleshooting](./troubleshooting.md) - common issues
 3. Check [Configuration Guide](./guides/configuration.md) - verify config
 4. Open an issue on GitHub with:
    - What you tried

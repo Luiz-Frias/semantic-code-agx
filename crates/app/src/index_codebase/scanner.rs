@@ -1,9 +1,11 @@
 //! File discovery and ignore policy for `index_codebase`.
 
-use super::types::{IndexCodebaseDeps, IndexCodebaseInput};
+use super::types::{IndexCodebaseDeps, IndexCodebaseInput, IndexStageStatsCollector};
 use semantic_code_ports::{FileSystemEntryKind, FileSystemPortExt, IgnoreMatchInput};
 use semantic_code_shared::{RequestContext, Result};
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
+use std::time::Instant;
 
 // TODO: refactor repeated optional logger/telemetry checks with a helper mapper.
 const CONTEXT_IGNORE_FILE: &str = ".contextignore";
@@ -28,8 +30,9 @@ pub(super) async fn load_index_files(
     ctx: &RequestContext,
     deps: &IndexCodebaseDeps,
     input: &IndexCodebaseInput,
+    stats: &Arc<IndexStageStatsCollector>,
 ) -> Result<Vec<Box<str>>> {
-    let ignore_patterns = load_ignore_patterns(ctx, deps, input).await?;
+    let ignore_patterns = load_ignore_patterns(ctx, deps, input, stats).await?;
     let raw_files = if let Some(file_list) = input.file_list.as_ref() {
         let mut files: Vec<Box<str>> = file_list
             .iter()
@@ -38,10 +41,10 @@ pub(super) async fn load_index_files(
         files.sort();
         files
     } else {
-        scan_code_files(ctx, deps, input, &ignore_patterns).await?
+        scan_code_files(ctx, deps, input, &ignore_patterns, stats).await?
     };
 
-    let files = filter_files(ctx, deps, raw_files, input, &ignore_patterns)?;
+    let files = filter_files(ctx, deps, raw_files, input, &ignore_patterns, stats)?;
     tracing::debug!(file_count = files.len(), "index scan finalized file list");
     Ok(files)
 }
@@ -51,7 +54,9 @@ async fn scan_code_files(
     deps: &IndexCodebaseDeps,
     input: &IndexCodebaseInput,
     ignore_patterns: &[Box<str>],
+    stats: &Arc<IndexStageStatsCollector>,
 ) -> Result<Vec<Box<str>>> {
+    let started = Instant::now();
     let supported_extensions = normalize_extensions(input.supported_extensions.as_ref());
     let filter_by_ext = !supported_extensions.is_empty();
     let fs = deps.filesystem.session(input.codebase_root.clone());
@@ -115,6 +120,7 @@ async fn scan_code_files(
                             .map(String::into_boxed_str)
                             .collect::<Vec<_>>();
                         out.sort();
+                        stats.record_scan_code_files(started.elapsed());
                         return Ok(out);
                     }
                 },
@@ -128,6 +134,7 @@ async fn scan_code_files(
         .map(String::into_boxed_str)
         .collect::<Vec<_>>();
     out.sort();
+    stats.record_scan_code_files(started.elapsed());
     Ok(out)
 }
 
@@ -137,7 +144,9 @@ fn filter_files(
     raw_files: Vec<Box<str>>,
     input: &IndexCodebaseInput,
     ignore_patterns: &[Box<str>],
+    stats: &Arc<IndexStageStatsCollector>,
 ) -> Result<Vec<Box<str>>> {
+    let started = Instant::now();
     ctx.ensure_not_cancelled("index_codebase.filter_files")?;
 
     let supported_extensions = normalize_extensions(input.supported_extensions.as_ref());
@@ -172,6 +181,7 @@ fn filter_files(
     }
 
     files.sort();
+    stats.record_filter_files(started.elapsed());
     Ok(files)
 }
 
@@ -179,7 +189,9 @@ async fn load_ignore_patterns(
     ctx: &RequestContext,
     deps: &IndexCodebaseDeps,
     input: &IndexCodebaseInput,
+    stats: &Arc<IndexStageStatsCollector>,
 ) -> Result<Vec<Box<str>>> {
+    let started = Instant::now();
     let mut patterns = input.ignore_patterns.clone().unwrap_or_default();
     patterns.push(CONTEXT_IGNORE_FILE.into());
 
@@ -209,6 +221,7 @@ async fn load_ignore_patterns(
 
     patterns.sort();
     patterns.dedup();
+    stats.record_scan_load_ignore_patterns(started.elapsed());
     Ok(patterns)
 }
 

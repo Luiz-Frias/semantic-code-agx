@@ -25,15 +25,17 @@ dev-tools = []
 milvus = ["milvus-grpc", "milvus-rest"]
 milvus-grpc = ["semantic-code-facade/milvus-grpc"]
 milvus-rest = ["semantic-code-facade/milvus-rest"]
-experimental-dfrr-kernel = ["semantic-code-facade/experimental-dfrr-kernel"]
-ane = ["semantic-code-facade/ane"]
+experimental-dfrr-kernel = ["semantic-code-facade/experimental-dfrr-kernel"]  # Stub — no private dep wired
+ane = ["semantic-code-facade/ane"]  # Stub — no private dep wired
 
 [dependencies]
 semantic-code-facade.workspace = true
 semantic-code-shared.workspace = true
 semantic-code-vector.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

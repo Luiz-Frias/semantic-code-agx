@@ -20,4 +20,4 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-semantic-code-testkit.workspace = true
+# semantic-code-testkit.workspace = true  # Internal test doubles

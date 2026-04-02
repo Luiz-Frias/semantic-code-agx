@@ -393,6 +393,10 @@ pub struct ChunkIdInput {
     pub relative_path: Box<str>,
     /// Line span for the chunk (validated).
     pub span: LineSpan,
+    /// Optional byte offset of this fragment within the original line-span content.
+    pub fragment_start_byte: Option<u32>,
+    /// Optional exclusive byte offset of this fragment within the original line-span content.
+    pub fragment_end_byte: Option<u32>,
     /// Chunk content.
     pub content: Box<str>,
 }
@@ -407,8 +411,18 @@ impl ChunkIdInput {
         Self {
             relative_path: relative_path.into(),
             span,
+            fragment_start_byte: None,
+            fragment_end_byte: None,
             content: content.into(),
         }
+    }
+
+    /// Attach fragment-local byte offsets for subchunks derived from the same span.
+    #[must_use]
+    pub const fn with_fragment_bytes(mut self, start_byte: u32, end_byte: u32) -> Self {
+        self.fragment_start_byte = Some(start_byte);
+        self.fragment_end_byte = Some(end_byte);
+        self
     }
 }
 
@@ -421,6 +435,13 @@ pub fn derive_chunk_id(input: &ChunkIdInput) -> Result<ChunkId, PrimitiveError> 
     hasher.update(b":");
     hasher.update(input.span.end_line().to_string().as_bytes());
     hasher.update(b":");
+    if let (Some(start_byte), Some(end_byte)) = (input.fragment_start_byte, input.fragment_end_byte)
+    {
+        hasher.update(start_byte.to_string().as_bytes());
+        hasher.update(b":");
+        hasher.update(end_byte.to_string().as_bytes());
+        hasher.update(b":");
+    }
     hasher.update(input.content.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
     let hash_prefix: String = hash.chars().take(16).collect();
@@ -654,6 +675,17 @@ mod tests {
         let input = CollectionNamingInput::new("repo", IndexMode::Hybrid);
         let derived = derive_collection_name(&input)?;
         assert!(derived.as_str().starts_with("hybrid_code_chunks_"));
+        Ok(())
+    }
+
+    #[test]
+    fn derive_chunk_id_distinguishes_fragment_offsets() -> Result<(), PrimitiveError> {
+        let span = LineSpan::new(10, 20).expect("valid test span");
+        let base = ChunkIdInput::new("src/repeated.rs", span, "xxxxxxxx");
+        let first = derive_chunk_id(&base.clone().with_fragment_bytes(0, 8))?;
+        let second = derive_chunk_id(&base.with_fragment_bytes(8, 16))?;
+
+        assert_ne!(first, second);
         Ok(())
     }
 

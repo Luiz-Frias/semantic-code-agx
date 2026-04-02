@@ -3,7 +3,11 @@
 use crate::cli_local::{run_index_local_with_progress, run_reindex_local_with_progress};
 use crate::{InfraError, InfraResult};
 use semantic_code_app::{
-    IndexCodebaseOutput, IndexCodebaseStatus, IndexProgress, IndexStageStats, ReindexByChangeOutput,
+    EmbedStageStats as AppEmbedStageStats, FunctionTimingStats as AppFunctionTimingStats,
+    IndexCodebaseOutput, IndexCodebaseStatus, IndexProgress, IndexStageStats,
+    InsertStageStats as AppInsertStageStats, PrepareStageStats as AppPrepareStageStats,
+    ReindexByChangeOutput, ScanStageStats as AppScanStageStats,
+    SplitStageStats as AppSplitStageStats,
 };
 use semantic_code_config::{
     IndexRequestDto, ReindexByChangeRequestDto, validate_index_request,
@@ -139,7 +143,7 @@ pub enum JobResult {
         /// Index completion status.
         index_status: Box<str>,
         /// Stage-level ingestion stats.
-        stage_stats: JobStageStats,
+        stage_stats: Box<JobStageStats>,
     },
     /// Reindex job result.
     Reindex {
@@ -156,6 +160,8 @@ pub enum JobResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStageStats {
+    /// Prepare stage stats.
+    pub prepare: JobPrepareStats,
     /// Scan stage stats.
     pub scan: JobScanStats,
     /// Split stage stats.
@@ -166,6 +172,31 @@ pub struct JobStageStats {
     pub insert: JobInsertStats,
 }
 
+/// Job-friendly function timing aggregate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobFunctionTimingStats {
+    pub calls: u64,
+    pub duration_ms: u64,
+}
+
+/// Job-friendly prepare stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobPrepareStats {
+    pub duration_ms: u64,
+    pub breakdown: JobPrepareBreakdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobPrepareBreakdown {
+    pub has_collection: JobFunctionTimingStats,
+    pub drop_collection: JobFunctionTimingStats,
+    pub detect_dimension: JobFunctionTimingStats,
+    pub create_collection: JobFunctionTimingStats,
+}
+
 /// Job-friendly scan stats.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,6 +205,16 @@ pub struct JobScanStats {
     pub files: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level scan breakdown.
+    pub breakdown: JobScanBreakdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobScanBreakdown {
+    pub load_ignore_patterns: JobFunctionTimingStats,
+    pub scan_code_files: JobFunctionTimingStats,
+    pub filter_files: JobFunctionTimingStats,
 }
 
 /// Job-friendly split stats.
@@ -186,6 +227,17 @@ pub struct JobSplitStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level split breakdown.
+    pub breakdown: JobSplitBreakdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobSplitBreakdown {
+    pub file_passes_size_check: JobFunctionTimingStats,
+    pub read_file_text_or_skip: JobFunctionTimingStats,
+    pub split_file_or_skip: JobFunctionTimingStats,
+    pub await_file_task: JobFunctionTimingStats,
 }
 
 /// Job-friendly embed stats.
@@ -198,6 +250,17 @@ pub struct JobEmbedStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level embed breakdown.
+    pub breakdown: JobEmbedBreakdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobEmbedBreakdown {
+    pub queue_latency: JobFunctionTimingStats,
+    pub provider_embed_batch: JobFunctionTimingStats,
+    pub build_insert_documents: JobFunctionTimingStats,
+    pub await_embedding_task: JobFunctionTimingStats,
 }
 
 /// Job-friendly insert stats.
@@ -210,6 +273,15 @@ pub struct JobInsertStats {
     pub chunks: u64,
     /// Elapsed time in milliseconds.
     pub duration_ms: u64,
+    /// Function-level insert breakdown.
+    pub breakdown: JobInsertBreakdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobInsertBreakdown {
+    pub provider_insert_batch: JobFunctionTimingStats,
+    pub await_insert_task: JobFunctionTimingStats,
 }
 
 impl From<IndexCodebaseOutput> for JobResult {
@@ -218,33 +290,90 @@ impl From<IndexCodebaseOutput> for JobResult {
             indexed_files: output.indexed_files,
             total_chunks: output.total_chunks,
             index_status: index_status_label(output.status),
-            stage_stats: JobStageStats::from(&output.stage_stats),
+            stage_stats: Box::new(JobStageStats::from(&output.stage_stats)),
         }
+    }
+}
+
+const fn job_timing_stats(stats: &AppFunctionTimingStats) -> JobFunctionTimingStats {
+    JobFunctionTimingStats {
+        calls: stats.calls,
+        duration_ms: stats.duration_ms,
+    }
+}
+
+const fn job_prepare_stats(stats: &AppPrepareStageStats) -> JobPrepareStats {
+    JobPrepareStats {
+        duration_ms: stats.duration_ms,
+        breakdown: JobPrepareBreakdown {
+            has_collection: job_timing_stats(&stats.breakdown.has_collection),
+            drop_collection: job_timing_stats(&stats.breakdown.drop_collection),
+            detect_dimension: job_timing_stats(&stats.breakdown.detect_dimension),
+            create_collection: job_timing_stats(&stats.breakdown.create_collection),
+        },
+    }
+}
+
+const fn job_scan_stats(stats: &AppScanStageStats) -> JobScanStats {
+    JobScanStats {
+        files: stats.files,
+        duration_ms: stats.duration_ms,
+        breakdown: JobScanBreakdown {
+            load_ignore_patterns: job_timing_stats(&stats.breakdown.load_ignore_patterns),
+            scan_code_files: job_timing_stats(&stats.breakdown.scan_code_files),
+            filter_files: job_timing_stats(&stats.breakdown.filter_files),
+        },
+    }
+}
+
+const fn job_split_stats(stats: &AppSplitStageStats) -> JobSplitStats {
+    JobSplitStats {
+        files: stats.files,
+        chunks: stats.chunks,
+        duration_ms: stats.duration_ms,
+        breakdown: JobSplitBreakdown {
+            file_passes_size_check: job_timing_stats(&stats.breakdown.file_passes_size_check),
+            read_file_text_or_skip: job_timing_stats(&stats.breakdown.read_file_text_or_skip),
+            split_file_or_skip: job_timing_stats(&stats.breakdown.split_file_or_skip),
+            await_file_task: job_timing_stats(&stats.breakdown.await_file_task),
+        },
+    }
+}
+
+const fn job_embed_stats(stats: &AppEmbedStageStats) -> JobEmbedStats {
+    JobEmbedStats {
+        batches: stats.batches,
+        chunks: stats.chunks,
+        duration_ms: stats.duration_ms,
+        breakdown: JobEmbedBreakdown {
+            queue_latency: job_timing_stats(&stats.breakdown.queue_latency),
+            provider_embed_batch: job_timing_stats(&stats.breakdown.provider_embed_batch),
+            build_insert_documents: job_timing_stats(&stats.breakdown.build_insert_documents),
+            await_embedding_task: job_timing_stats(&stats.breakdown.await_embedding_task),
+        },
+    }
+}
+
+const fn job_insert_stats(stats: &AppInsertStageStats) -> JobInsertStats {
+    JobInsertStats {
+        batches: stats.batches,
+        chunks: stats.chunks,
+        duration_ms: stats.duration_ms,
+        breakdown: JobInsertBreakdown {
+            provider_insert_batch: job_timing_stats(&stats.breakdown.provider_insert_batch),
+            await_insert_task: job_timing_stats(&stats.breakdown.await_insert_task),
+        },
     }
 }
 
 impl From<&IndexStageStats> for JobStageStats {
     fn from(stats: &IndexStageStats) -> Self {
         Self {
-            scan: JobScanStats {
-                files: stats.scan.files,
-                duration_ms: stats.scan.duration_ms,
-            },
-            split: JobSplitStats {
-                files: stats.split.files,
-                chunks: stats.split.chunks,
-                duration_ms: stats.split.duration_ms,
-            },
-            embed: JobEmbedStats {
-                batches: stats.embed.batches,
-                chunks: stats.embed.chunks,
-                duration_ms: stats.embed.duration_ms,
-            },
-            insert: JobInsertStats {
-                batches: stats.insert.batches,
-                chunks: stats.insert.chunks,
-                duration_ms: stats.insert.duration_ms,
-            },
+            prepare: job_prepare_stats(&stats.prepare),
+            scan: job_scan_stats(&stats.scan),
+            split: job_split_stats(&stats.split),
+            embed: job_embed_stats(&stats.embed),
+            insert: job_insert_stats(&stats.insert),
         }
     }
 }
@@ -548,6 +677,8 @@ fn stage_from_phase(phase: &str) -> Box<str> {
         "scan".into()
     } else if phase.contains("process") || phase.contains("chunk") {
         "chunk".into()
+    } else if phase.contains("prewarm") || phase.contains("finaliz") || phase.contains("publish") {
+        "publish".into()
     } else if phase.contains("collection") {
         "prepare".into()
     } else {
@@ -663,5 +794,17 @@ mod tests {
         let loaded = read_job_request(&job_dir, &request.id)?;
         assert_eq!(loaded.kind, JobKind::Index);
         Ok(())
+    }
+
+    #[test]
+    fn stage_from_phase_maps_publish_telemetry() {
+        assert_eq!(
+            stage_from_phase("Finalizing generation...").as_ref(),
+            "publish"
+        );
+        assert_eq!(
+            stage_from_phase("Prewarming kernel ready states...").as_ref(),
+            "publish"
+        );
     }
 }

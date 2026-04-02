@@ -33,9 +33,9 @@ impl SnapshotStorageMode {
 #[serde(rename_all = "lowercase")]
 pub enum VectorSnapshotFormat {
     /// Legacy JSON snapshot (`<collection>.json`).
-    #[default]
     V1,
     /// Binary companion snapshot (`snapshot.meta` + `vectors.u8.bin`).
+    #[default]
     V2,
 }
 

@@ -437,6 +437,8 @@ struct VectorDbConfigOverrides {
     hnsw_search: Option<HnswSearchConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dfrr_search: Option<DfrrSearchConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dfrr_prewarm_searches: Option<Vec<DfrrSearchConfig>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -448,6 +450,8 @@ struct SyncConfigOverrides {
     ignore_patterns: Option<Vec<Box<str>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_files: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_chunks: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_file_size_bytes: Option<u64>,
 }
@@ -742,6 +746,13 @@ fn apply_vector_db_overrides(config: &mut BackendConfig, overrides: &VectorDbCon
     if overrides.dfrr_search.is_some() {
         mapper.config.vector_db.dfrr_search = overrides.dfrr_search;
     }
+    if let Some(dfrr_prewarm_searches) = overrides.dfrr_prewarm_searches.as_ref() {
+        mapper
+            .config
+            .vector_db
+            .dfrr_prewarm_searches
+            .clone_from(dfrr_prewarm_searches);
+    }
 }
 
 fn apply_sync_overrides(config: &mut BackendConfig, overrides: &SyncConfigOverrides) {
@@ -755,6 +766,7 @@ fn apply_sync_overrides(config: &mut BackendConfig, overrides: &SyncConfigOverri
         overrides.ignore_patterns.as_ref(),
     );
     OverrideMapper::set_u32(&mut mapper.config.sync.max_files, overrides.max_files);
+    OverrideMapper::set_opt_u32(&mut mapper.config.sync.max_chunks, overrides.max_chunks);
     OverrideMapper::set_u64(
         &mut mapper.config.sync.max_file_size_bytes,
         overrides.max_file_size_bytes,
@@ -886,6 +898,25 @@ mod tests {
         let env = BackendEnv::default();
         let config = load_backend_config_from_sources_with_env(None, Some(overrides_json), &env)?;
         assert_eq!(config.vector_db.vector_kernel, Some(VectorKernelKind::Dfrr));
+        Ok(())
+    }
+
+    #[test]
+    fn vector_db_dfrr_prewarm_searches_override_applies() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let overrides_json = r#"{
+          "vectorDb": {
+            "dfrrPrewarmSearches": [
+              { "efSearch": 64, "clusterCount": 8, "queryStrategy": "static" },
+              { "efSearch": 96, "clusterCount": 12, "queryStrategy": "nearest-centroid" }
+            ]
+          }
+        }"#;
+        let env = BackendEnv::default();
+        let config = load_backend_config_from_sources_with_env(None, Some(overrides_json), &env)?;
+        assert_eq!(config.vector_db.dfrr_prewarm_searches.len(), 2);
+        assert_eq!(config.vector_db.dfrr_prewarm_searches[0].ef_search, 64);
+        assert_eq!(config.vector_db.dfrr_prewarm_searches[1].cluster_count, 12);
         Ok(())
     }
 

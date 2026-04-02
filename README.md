@@ -20,10 +20,11 @@ Traditional code search (grep, ripgrep) finds exact matches. Semantic search und
 
 - **Embedding providers**: ONNX (local), OpenAI, Gemini, Voyage, Ollama, Apple Neural Engine (feature-gated)
 - **Local vector kernels**: HNSW by default, experimental DFRR, and exact `flat-scan` ground truth
-- **Snapshot v2 + quantization**: mmap-backed local bundles, subset/tile tooling, and storage preflight
+- **Generation-based collections**: Staged publish lifecycle with SQLite catalog, exact f32 row bundles, and kernel-ready persistence — collections are durable, resumable, and garbage-collected
+- **Snapshot v2 + quantization**: mmap-backed local bundles, SQ8 quantization, and storage preflight
 - **AST-aware splitting**: Tree-sitter parsing with line-based fallback
 - **Change-aware reindex**: Snapshot-driven change detection with WAL-backed local durability
-- **CLI-first**: Deterministic output for automation and AI agents, including `estimate-storage`, `calibrate`, `snapshot-subset`, `search --stdin-batch`, and structured tracing
+- **Agent-native CLI**: Deterministic NDJSON output, machine-readable protocol spec via `sca agent-doc`, `estimate-storage`, `calibrate`, `search --stdin-batch`, and structured tracing
 
 ## Quick Start
 
@@ -80,17 +81,27 @@ Use `--agent` for NDJSON output, no prompts, and quiet stderr:
 sca --agent search --query "error handling"
 ```
 
+Get the machine-readable protocol spec (all commands, NDJSON shapes, exit codes, recovery table):
+
+```bash
+sca agent-doc          # full spec
+sca agent-doc search   # scoped to one command
+```
+
+See [`TOOL.agents.md`](TOOL.agents.md) for the compact agent integration guide, or [`TOOL.md`](TOOL.md) for the full wire contract.
+
 ## Documentation
 
-Full documentation is available in `docs/`:
+Full documentation is available in [`docs/`](docs/README.md):
 
-- **[Getting Started](docs/GETTING_STARTED.md)**
-- **[Release & Install](docs/release.md)**
-- **[Architecture](docs/architecture/README.md)**
-- **[Configuration](docs/guides/configuration.md)**
-- **[CLI Reference](docs/reference/cli.md)**
-- **[Troubleshooting](docs/TROUBLESHOOTING.md)**
-- **[FAQ](docs/FAQ.md)**
+| Audience | Document |
+|----------|----------|
+| New users | [Getting Started](docs/getting-started.md) |
+| Users | [Configuration](docs/guides/configuration.md) · [Indexing](docs/guides/indexing.md) · [Searching](docs/guides/searching.md) |
+| Agents | [`TOOL.agents.md`](TOOL.agents.md) · [`TOOL.md`](TOOL.md) · `sca agent-doc` |
+| Contributors | [Architecture](docs/architecture/README.md) · [ADRs](docs/adrs/README.md) |
+| Reference | [CLI](docs/reference/cli.md) · [Config Schema](docs/reference/config-schema.md) · [Error Codes](docs/reference/error-codes.md) |
+| Operations | [Troubleshooting](docs/troubleshooting.md) · [FAQ](docs/faq.md) · [Release](docs/release.md) |
 
 ## Development
 

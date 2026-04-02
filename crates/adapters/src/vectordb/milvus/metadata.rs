@@ -56,6 +56,8 @@ pub(super) fn metadata_from_fields(
             .filter(|ext| !ext.is_empty())
             .map(|ext| ext.to_owned().into_boxed_str()),
         span,
+        fragment_start_byte: None,
+        fragment_end_byte: None,
         node_kind: None,
     };
 
@@ -109,6 +111,8 @@ fn metadata_from_value(value: &Value) -> Option<VectorDocumentMetadata> {
         language,
         file_extension,
         span,
+        fragment_start_byte: None,
+        fragment_end_byte: None,
         node_kind,
     })
 }

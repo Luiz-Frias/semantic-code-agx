@@ -6,11 +6,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-04-01
+
+### Breaking Changes
+- The `snapshot-subset` CLI command has been removed. Subset/tile tooling now lives in the sibling `bench-lab-rs` repo.
+- Collection storage layout has changed: local collections now use a `generations/` directory structure with SQLite catalog tracking, an `ACTIVE` pointer file, and kernel-namespaced ready-state directories. Existing `.v2/` snapshot bundles are auto-migrated on first load, but the new layout is not backward-compatible with v0.2.0 tooling.
+
 ### Added
 
+#### Generation-Based Collection Lifecycle
+- Full generation control system for local vector collections: exact f32 row storage, SQLite catalog tracking, staged insert-then-publish lifecycle, and durable generation pointers (`ACTIVE` file). Each generation bundles base vectors, origin mappings, and kernel-ready state under `generations/{gen_id}/`.
+- Kernel capability model (`VectorKernelKind`) enables the vector backend to advertise what it supports (graph, quantization, exact scan) and the adapter to select the appropriate load/build strategy.
+- Staged publish flow: inserts accumulate in a clean-slate journal, then atomically publish via `flush` — prevents partial collections from being visible to readers.
+- Tombstone reclamation: dead entries are garbage-collected on snapshot persist via `rebuild_active_index`, compacting the collection.
+- Origin-ID mapping provides stable cross-checkpoint identity for incremental operations (quantization cache, DFRR graph reuse).
+
+#### Collection Loader Actor
+- Actor-based collection initialization replaces per-collection `OnceCell` gates. The actor serializes `Load`, `Evict`, and `Reload` commands through an `mpsc` channel, eliminating TOCTOU races in concurrent access paths. Hot reads/writes still use `Arc<RwLock<HashMap>>` directly — the actor only controls *when* the map is populated or cleared.
+- Per-load `CancellationToken` support: individual collection loads can be cancelled without affecting other in-flight operations.
+
+#### DFRR Ready-State Prewarm
+- DFRR kernel state (graph, rank structures) is now persisted to a `dfrr/` sidecar inside `.v2/` bundles. On subsequent loads, the kernel restores from cache instead of rebuilding — eliminating the ~34s cold-start graph reconstruction for large collections.
+- Prewarm lifecycle with heartbeat logging and post-index finalization hooks. The adapter gates DFRR search on prewarmed ready state to prevent queries against partially-built structures.
+
+#### CLI
+- `sca agent-doc [COMMAND]`: machine-readable AGX protocol spec in YAML. Full invocation emits the complete protocol (commands, NDJSON shapes, exit codes, recovery table, filter syntax, workflows). Scoped invocation emits a single command contract.
+
+#### Configuration
+- `DfrrBq1ThresholdMode` enum with `ClusterPercentile` variant for BQ1 percentile-assist threshold selection.
+- `max_chunks` field in sync configuration for corpus-size limiting.
+- DFRR BQ1 environment variable overrides (`SCA_DFRR_BQ1_*`).
+
+#### Vector Kernel
+- Cooperative cancellation for HNSW insert and snapshot load operations via `CancellationToken`.
+- Distance evaluation tracking in HNSW search for observability.
+- Exact row and generation foundation types (`ExactVectorRow`, `ExactVectorRows`, `GenerationId`, `OriginId`).
+
+#### Tooling
+- Claude Code slash command workflows: `gather-context`, `implement`, `review-fix`, `review-patterns`.
+- Linear status update post-commit hook: auto-moves Linear issues to "In Review" when a PR exists on `FOR-*` branches.
+- Pre-commit configuration via `prek` with 10 active git hooks.
+
+#### Documentation
+- Architecture: collection loader actor design, incremental DFRR design, curvature-guided DFRR maintenance.
+- Research: DFRR mutation concurrency report.
+
 ### Changed
+- Benchmark infrastructure extracted to sibling [`bench-lab-rs`](https://github.com/Luiz-Frias/bench-lab-rs) repo. Removed ~15 scripts (`bench-run-all.sh`, `bench-scaling-sweep.sh`, `bench-analyze-*.py`, `bench-dfrr-vs-hnsw.py`, etc.), the in-tree `bench-runner` crate, DVC-tracked scaling data, and golden query fixtures.
+- Local adapter now defaults to V2 snapshots with DFRR persistence and skips HNSW graph rebuild for graph-agnostic kernels.
+- Collection loader refactored from `OnceCell` per-collection gates to actor-based architecture with serialized lifecycle commands.
+- CLI runtime unified to `multi_thread(1)` for all async paths — fixes macOS kqueue edge-triggered notification loss while maintaining single-worker scheduling semantics.
+- Shared cancellation token backed by `tokio-util` (`CancellationToken` replaces manual implementation).
+- Checkpoint build path uses typestate v2 for compile-time correctness guarantees.
+- Splitter deduplicates fallback spans before chunk materialization via fragment-aware chunk identity.
+- Vector index tracks origin IDs for stable cross-checkpoint identity mapping.
 
 ### Fixed
+- **Three-layer race condition** in collection initialization: (1) macOS kqueue edge-triggered notification loss between `spawn_blocking` and runtime park, (2) TOCTOU in check-then-load allowing duplicate 800MB+ loads, (3) no reload/failure recovery after `OnceCell` drop. All resolved by the actor architecture and `multi_thread(1)` runtime.
+- Pre-embed hang and collection load races resolved via actor command serialization.
+- HNSW graph identity decoupled from payload slots — prevents stale graph references on unsafe checkpoint.
+- HNSW insertion path serialized to prevent concurrent data corruption.
+- Staging upsert parity restored for vector snapshot insert operations.
+- Duplicate-ID sidecar load errors now raised explicitly instead of silently skipping.
+- Fragment-aware chunk identity prevents duplicate chunks from splitter dedup failures.
+- HNSW `ef` parameter now honored when zero-threshold DFRR search doesn't widen (search quality fix).
+- Panic vs cancellation properly discriminated in `spawn_blocking` `JoinError` handling.
+
+### Performance
+- Parallel HNSW insertion via `rayon` for batch inserts.
+- Incremental SQ8 quantization across checkpoints — avoids re-quantizing the entire collection on every persist.
+- Shared quantized vectors via `Arc` between snapshot and cache, eliminating redundant copies.
+- Checkpoint frequency throttled by vector count to reduce I/O overhead on small inserts.
+- Triple quantization eliminated in the V2 checkpoint path.
+- Parallel index + sidecar loading via `try_join!`.
+- HNSW graph build skipped entirely for graph-agnostic kernels (DFRR, flat-scan).
+- Origin-ID mapping enables incremental quantization cache across checkpoints.
 
 ## [0.2.0] - 2026-03-06
 
@@ -105,6 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore Cargo advisory DB and lock artifacts via `.gitignore`.
 - Developer setup now prefers `.env.local` for local overrides.
 
+[0.3.0]: https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/tag/v0.2.0
-[Unreleased]: https://github.com/Luiz-Frias/semantic-code-agents-rs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Luiz-Frias/semantic-code-agents-rs/compare/v0.3.0...HEAD
 [0.1.1]: https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/tag/v0.1.1

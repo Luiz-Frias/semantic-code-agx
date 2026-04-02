@@ -219,7 +219,7 @@ For faster searches:
 - Consider local ONNX for speed
 - Reduce top_k if you don't need many results
 
-See [Troubleshooting](../TROUBLESHOOTING.md) for more.
+See [Troubleshooting](../troubleshooting.md) for more.
 
 ## Related Guides
 
