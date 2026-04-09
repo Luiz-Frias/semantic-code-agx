@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+
+### Added
+
+### Changed
+
+### Fixed
+
+## [0.4.0] - 2026-04-09
+
+### Added
+- feat(config): make HNSW M and ef_construction configurable (#45)
+- feat(config): wire shadow PQ config + dimension-aware factory — FOR-109 (#44)
+- feat(docs): +/public-sync cmd for published releases
+- feat(docs): +important architectural designs
+
+### Changed
+- refactor(config): decompose apply_vector_db_env_overrides into sub-concern helpers (#46)
+- refactor(vector): add versioned kernel source path contract (#43)
+
+### Fixed
+- fix(ci): prevent root mise.toml leak + clippy auto-fixes
+
+### Infrastructure
+- build(deps): major version bumps — sha2, md5, rusqlite, toml
+- chore(deps): cargo update — 64 patch/minor bumps
+- chore(ci): sync mise.ci.toml with root mise.toml (nightly-2026-04-01)
+- chore(deps): bump workspace crates to v0.3.0 (#42)
+
 ## [0.3.0] - 2026-04-01
 
 ### Breaking Changes
@@ -176,7 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore Cargo advisory DB and lock artifacts via `.gitignore`.
 - Developer setup now prefers `.env.local` for local overrides.
 
-[0.3.0]: https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/tag/v0.3.0
-[0.2.0]: https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/tag/v0.2.0
-[Unreleased]: https://github.com/Luiz-Frias/semantic-code-agents-rs/compare/v0.3.0...HEAD
-[0.1.1]: https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/tag/v0.1.1
+[0.3.0]: https://github.com/Luiz-Frias/semantic-code-agx/releases/tag/v0.3.0
+[0.2.0]: https://github.com/Luiz-Frias/semantic-code-agx/releases/tag/v0.2.0
+[0.4.0]: https://github.com/Luiz-Frias/semantic-code-agx/compare/v0.3.0...v0.4.0
+[Unreleased]: https://github.com/Luiz-Frias/semantic-code-agx/compare/v0.4.0...HEAD
+[0.1.1]: https://github.com/Luiz-Frias/semantic-code-agx/releases/tag/v0.1.1

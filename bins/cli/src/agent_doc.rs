@@ -601,7 +601,7 @@ mod tests {
 
         // Verify top-level keys exist.
         let has_key =
-            |key: &str| mapping.contains_key(&serde_yaml_ng::Value::String(key.to_owned()));
+            |key: &str| mapping.contains_key(serde_yaml_ng::Value::String(key.to_owned()));
         assert!(has_key("protocol"), "missing 'protocol' key");
         assert!(has_key("commands"), "missing 'commands' key");
         assert!(has_key("ndjson_shapes"), "missing 'ndjson_shapes' key");
@@ -627,12 +627,12 @@ mod tests {
 
         let commands = parsed
             .as_mapping()
-            .and_then(|m| m.get(&serde_yaml_ng::Value::String("commands".to_owned())))
+            .and_then(|m| m.get(serde_yaml_ng::Value::String("commands".to_owned())))
             .and_then(serde_yaml_ng::Value::as_mapping);
 
         if let Some(cmds) = commands {
             assert!(
-                !cmds.contains_key(&serde_yaml_ng::Value::String("index".to_owned())),
+                !cmds.contains_key(serde_yaml_ng::Value::String("index".to_owned())),
                 "scoped output should not contain 'index' command"
             );
         }

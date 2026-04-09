@@ -1,6 +1,6 @@
 # Hexagonal Architecture
 
-This document explains the hexagonal (ports and adapters) architecture pattern as implemented in semantic-code-agents-rs.
+This document explains the hexagonal (ports and adapters) architecture pattern as implemented in semantic-code-agx.
 
 ## What is Hexagonal Architecture?
 

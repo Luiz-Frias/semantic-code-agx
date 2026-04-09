@@ -25,8 +25,8 @@ dev-tools = []
 milvus = ["milvus-grpc", "milvus-rest"]
 milvus-grpc = ["semantic-code-facade/milvus-grpc"]
 milvus-rest = ["semantic-code-facade/milvus-rest"]
-experimental-dfrr-kernel = ["semantic-code-facade/experimental-dfrr-kernel"]  # Stub — no private dep wired
-ane = ["semantic-code-facade/ane"]  # Stub — no private dep wired
+experimental-dfrr-kernel = ["semantic-code-facade/experimental-dfrr-kernel"]
+ane = []  # stub: forwarding to private dep
 
 [dependencies]
 semantic-code-facade.workspace = true

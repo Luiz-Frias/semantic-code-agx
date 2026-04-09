@@ -33,6 +33,25 @@ Kernel trait:
 - `VectorKernel::search(...)`
 - `VectorKernel::search_with_config_override(...)`
 - `VectorKernel::set_snapshot_dir(...)`
+- `VectorKernel::materialize_runtime(...)`
+- `VectorKernel::warm_from_source(...)`
+
+Source/runtime contracts:
+
+- `legacy_vector_index_v0`
+  The compatibility path. The kernel is warmed and searched with a concrete
+  `VectorIndex` and may materialize a borrowed runtime wrapper over that same
+  index.
+- `segmented_source_v1`
+  The canonical DFRR path. The loader may warm ready state from a
+  `PublishedGenerationKernelSource` derived from the immutable exact-row
+  generation bundle instead of rebuilding the kernel state from
+  `VectorIndex::active_records()`.
+
+This means the collection loader and DFRR prewarm flow can use the published
+generation as the source of truth for ready-state materialization while still
+binding the ready state to the runtime `VectorIndex` that the local adapter
+keeps for collection bookkeeping and compatibility.
 
 Current runtime behavior is build-dependent:
 
@@ -85,6 +104,11 @@ persistence-capable experimental DFRR builds, that hook is used to persist a
 state metadata) and restore it on later processes. If the sidecar is missing,
 corrupt, or stale relative to node count/dimension, DFRR rebuilds from the
 loaded collection and rewrites the cache.
+
+For generation-backed DFRR loads, the local adapter now prefers warming from
+`PublishedGenerationKernelSource` whenever the kernel family reports
+`segmented_source_v1` as its canonical source path. Legacy kernels continue to
+use the `legacy_vector_index_v0` path.
 
 ## Snapshot stats and limits
 

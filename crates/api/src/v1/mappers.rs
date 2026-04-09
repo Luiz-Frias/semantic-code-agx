@@ -125,9 +125,9 @@ mod tests {
         .with_metadata("path", "src/lib.rs");
 
         let dto = error_envelope_to_api_v1_error(&envelope, None);
-        let meta = dto.meta.ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "meta should be present")
-        })?;
+        let meta = dto
+            .meta
+            .ok_or_else(|| std::io::Error::other("meta should be present"))?;
         assert_eq!(dto.code, "ERR_DOMAIN_INVALID_COLLECTION_NAME");
         assert_eq!(dto.kind, ApiV1ErrorKind::Expected);
         assert_eq!(meta.get("token").map(String::as_str), Some("[REDACTED]"));

@@ -1137,8 +1137,8 @@ fn write_active_generation_catalog(
             (
                 generation_id.as_str(),
                 "published",
-                now_ms,
-                now_ms,
+                now_ms.cast_signed(),
+                now_ms.cast_signed(),
             ),
         )
         .map_err(|error| {
@@ -1206,8 +1206,8 @@ fn upsert_generation_state(
             (
                 generation_id.as_str(),
                 state,
-                now_ms,
-                now_ms,
+                now_ms.cast_signed(),
+                now_ms.cast_signed(),
             ),
         )
         .map_err(|error| {
@@ -1269,7 +1269,7 @@ pub(super) fn upsert_dfrr_ready_state(
                 state,
                 artifact_root.display().to_string(),
                 config_json,
-                now_ms,
+                now_ms.cast_signed(),
             ),
         )
         .map_err(|error| {

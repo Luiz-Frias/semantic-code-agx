@@ -1,6 +1,6 @@
 # Documentation
 
-Welcome to the **semantic-code-agents-rs** documentation -- a CLI-first semantic code search engine in Rust.
+Welcome to the **semantic-code-agx** documentation -- a CLI-first semantic code search engine in Rust.
 
 ## Quick Links
 

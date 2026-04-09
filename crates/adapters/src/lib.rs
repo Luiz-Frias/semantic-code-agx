@@ -66,7 +66,9 @@ pub use vectordb::milvus::{MilvusGrpcConfig, MilvusGrpcVectorDb};
 pub use vectordb::milvus::{MilvusIndexConfig, MilvusIndexSpec};
 #[cfg(feature = "milvus-rest")]
 pub use vectordb::milvus::{MilvusRestConfig, MilvusRestVectorDb};
-pub use vectordb_local::{DfrrReadyStatePrewarmRequest, DfrrReadyStateRequirement, LocalVectorDb};
+pub use vectordb_local::{
+    DfrrReadyStatePrewarmRequest, DfrrReadyStateRequirement, LocalVectorDb, LocalVectorDbBuilder,
+};
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,6 @@
 # Getting Started
 
-Get up and running with semantic-code-agents-rs in 5 minutes.
+Get up and running with semantic-code-agx in 5 minutes.
 
 Primary command: `sca` (alias: `semantic-code`).
 
@@ -17,7 +17,7 @@ Download the prebuilt artifact for your OS/arch and install `sca` into your PATH
 If you prefer a one-liner, use the release install script:
 
 ```bash
-curl -fsSL https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Luiz-Frias/semantic-code-agx/releases/latest/download/install.sh | sh
 ```
 
 Note: the install script targets macOS/Linux. Windows users should use Winget or Scoop.
@@ -37,14 +37,14 @@ winget install --id Luiz-Frias.SemanticCode -e
 ### Scoop (Windows)
 
 ```powershell
-scoop bucket add semantic-code https://github.com/Luiz-Frias/semantic-code-agents-rs
+scoop bucket add semantic-code https://github.com/Luiz-Frias/semantic-code-agx
 scoop install semantic-code
 ```
 
 ### mise (GitHub backend)
 
 ```bash
-mise use -g github:Luiz-Frias/semantic-code-agents-rs@latest
+mise use -g github:Luiz-Frias/semantic-code-agx@latest
 ```
 
 ### Cargo (from source)

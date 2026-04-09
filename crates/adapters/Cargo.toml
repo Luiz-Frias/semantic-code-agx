@@ -26,7 +26,7 @@ gemini = ["dep:reqwest"]
 ollama = ["dep:reqwest"]
 voyage = ["dep:reqwest"]
 onnx = ["dep:ort", "dep:tokenizers"]
-ane = []  # Stub — requires private ane-inference crate (not available in public builds)
+ane = []  # stub: private dep removed
 milvus-rest = ["dep:reqwest"]
 milvus-grpc = ["dep:base64", "dep:bytes", "dep:prost", "dep:tonic"]
 cache-postgres = ["dep:sqlx", "sqlx/postgres"]
@@ -58,7 +58,7 @@ tree-sitter-typescript.workspace = true
 reqwest = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
-# ane-inference = { workspace = true, optional = true }  # Private dep
+# ane-inference = { workspace = true, optional = true }  # private: ANE inference
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }

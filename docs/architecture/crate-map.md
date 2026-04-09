@@ -5,7 +5,7 @@ This document provides a visual overview of all crates in the workspace and thei
 ## Workspace Structure
 
 ```
-semantic-code-agents-rs/
+semantic-code-agx/
 ├── crates/
 │   ├── adapters/      # Concrete implementations (embeddings, vectordb, fs)
 │   ├── api/           # REST API types and validation

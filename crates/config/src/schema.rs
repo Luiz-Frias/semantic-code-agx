@@ -1063,6 +1063,93 @@ const fn default_hnsw_ef_search() -> u32 {
     200
 }
 
+/// Controls graph-construction parameters for the built-in HNSW kernel.
+///
+/// These affect index quality and memory usage.  They are applied once at
+/// index creation time — changing them requires a full reindex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HnswBuildConfig {
+    /// Maximum edges per node (default: 32).
+    ///
+    /// Higher M improves recall for high-dimensional vectors at the cost of
+    /// memory (each node stores up to M edges).  Production engines default
+    /// to 16, but 1024d embeddings benefit from 24–48.
+    #[serde(default = "default_hnsw_max_nb_connection")]
+    pub max_nb_connection: u32,
+
+    /// Construction beam width (default: 200).
+    ///
+    /// Controls the search width used when inserting new nodes into the graph.
+    /// Higher values produce a better-connected graph at the cost of build time.
+    /// Rule of thumb: `ef_construction >= 2 * M`.
+    #[serde(default = "default_hnsw_ef_construction")]
+    pub ef_construction: u32,
+}
+
+impl Default for HnswBuildConfig {
+    fn default() -> Self {
+        Self {
+            max_nb_connection: default_hnsw_max_nb_connection(),
+            ef_construction: default_hnsw_ef_construction(),
+        }
+    }
+}
+
+impl HnswBuildConfig {
+    /// Merge optional env-var overrides into a target `Option<Self>`.
+    ///
+    /// Creates a default config when either override is set and the target is
+    /// `None`, then applies whichever values are present.
+    pub fn merge_env_overrides(
+        target: &mut Option<Self>,
+        max_nb_connection: Option<u32>,
+        ef_construction: Option<u32>,
+    ) {
+        if max_nb_connection.is_none() && ef_construction.is_none() {
+            return;
+        }
+        let build = target.get_or_insert_with(Self::default);
+        if let Some(m) = max_nb_connection {
+            build.max_nb_connection = m;
+        }
+        if let Some(ef) = ef_construction {
+            build.ef_construction = ef;
+        }
+    }
+
+    fn validate(self) -> Result<(), ConfigSchemaError> {
+        validate_limit_u32(
+            "vectorDb.hnswBuild",
+            "maxNbConnection",
+            self.max_nb_connection,
+            HNSW_MAX_NB_CONNECTION_MIN,
+            HNSW_MAX_NB_CONNECTION_MAX,
+        )?;
+        validate_limit_u32(
+            "vectorDb.hnswBuild",
+            "efConstruction",
+            self.ef_construction,
+            HNSW_EF_CONSTRUCTION_MIN,
+            HNSW_EF_CONSTRUCTION_MAX,
+        )?;
+        Ok(())
+    }
+}
+
+const HNSW_MAX_NB_CONNECTION_MIN: u32 = 4;
+const HNSW_MAX_NB_CONNECTION_MAX: u32 = 128;
+const HNSW_EF_CONSTRUCTION_MIN: u32 = 16;
+const HNSW_EF_CONSTRUCTION_MAX: u32 = 2000;
+
+const fn default_hnsw_max_nb_connection() -> u32 {
+    32
+}
+
+const fn default_hnsw_ef_construction() -> u32 {
+    200
+}
+
 /// DFRR kernel search tuning parameters.
 ///
 /// Controls the search-time behavior of the DFRR kernel. These parameters
@@ -1138,6 +1225,18 @@ pub struct DfrrSearchConfig {
     /// triggers calibration with default parameters after indexing.
     #[serde(default)]
     pub auto_calibrate: bool,
+    /// Enable shadow PQ instrumentation (Lane 3 parasitic measurement, default: false).
+    ///
+    /// When enabled, every Lane 1 query also computes what PQ *would have* scored,
+    /// building a `PQTightnessReport` for the Phase 09 decision gate.
+    #[serde(default)]
+    pub shadow_pq_enabled: bool,
+    /// Shadow PQ sampling rate as a percentage (0–100, default: 100 = every pair).
+    ///
+    /// Controls what fraction of `(query, candidate)` pairs are measured.
+    /// Lower values reduce shadow overhead at the cost of fewer samples.
+    #[serde(default = "default_dfrr_shadow_pq_sample_pct")]
+    pub shadow_pq_sample_pct: u8,
 }
 
 impl Default for DfrrSearchConfig {
@@ -1162,6 +1261,8 @@ impl Default for DfrrSearchConfig {
             bq1_percentile_assist_sample_count: None,
             bq1_percentile_assist_target_rank: None,
             auto_calibrate: false,
+            shadow_pq_enabled: false,
+            shadow_pq_sample_pct: default_dfrr_shadow_pq_sample_pct(),
         }
     }
 }
@@ -1216,6 +1317,10 @@ const fn default_dfrr_query_probe_count() -> usize {
 
 const fn default_dfrr_query_min_cluster_size() -> usize {
     64
+}
+
+const fn default_dfrr_shadow_pq_sample_pct() -> u8 {
+    100
 }
 
 /// Vector DB configuration (local/external selection is handled in later milestones).
@@ -1285,6 +1390,12 @@ pub struct VectorDbConfig {
     /// peak bucket utilization, splits, levels traversed) are collected and
     /// emitted via tracing spans for each search operation.
     pub enable_search_metrics: bool,
+    /// HNSW graph construction tuning (only used when `vectorKernel = "hnsw-rs"`).
+    ///
+    /// Affects M and `ef_construction`.  Applied at index creation; changing
+    /// these requires a full reindex.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hnsw_build: Option<HnswBuildConfig>,
     /// HNSW kernel search tuning (only used when `vectorKernel = "hnsw-rs"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hnsw_search: Option<HnswSearchConfig>,
@@ -1326,6 +1437,7 @@ impl Default for VectorDbConfig {
             experimental_u8_search: false,
             force_reindex_on_kernel_change: false,
             enable_search_metrics: false,
+            hnsw_build: None,
             hnsw_search: None,
             dfrr_search: None,
             dfrr_prewarm_searches: Vec::new(),
@@ -1456,6 +1568,9 @@ impl VectorDbConfig {
         }
         validate_snapshot_storage("vectorDb", "snapshotStorage", &self.snapshot_storage)?;
         self.index.validate()?;
+        if let Some(ref hnsw) = self.hnsw_build {
+            hnsw.validate()?;
+        }
         Ok(())
     }
 

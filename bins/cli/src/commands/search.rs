@@ -418,7 +418,10 @@ mod tests {
         let stats = summary
             .get("searchStats")
             .ok_or_else(|| io::Error::other("missing searchStats"))?;
-        assert_eq!(stats.get("expansions").and_then(|v| v.as_u64()), Some(7));
+        assert_eq!(
+            stats.get("expansions").and_then(serde_json::Value::as_u64),
+            Some(7)
+        );
         assert_eq!(
             stats.get("kernel").and_then(|v| v.as_str()),
             Some("hnsw-rs")
@@ -455,12 +458,14 @@ mod tests {
             .get("extra")
             .ok_or_else(|| io::Error::other("missing extra in searchStats"))?;
         assert_eq!(
-            extra.get("pulls").and_then(|v| v.as_f64()),
+            extra.get("pulls").and_then(serde_json::Value::as_f64),
             Some(12.0),
             "extra metric 'pulls' should be in searchStats.extra"
         );
         assert_eq!(
-            extra.get("peakBucketUtilization").and_then(|v| v.as_f64()),
+            extra
+                .get("peakBucketUtilization")
+                .and_then(serde_json::Value::as_f64),
             Some(0.75),
             "extra metric 'peakBucketUtilization' should be in searchStats.extra"
         );

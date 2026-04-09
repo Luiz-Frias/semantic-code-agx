@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(pending, 1);
 
         let pending = types::max_pending_batches(4, Some(32), 4);
-        assert_eq!(pending, 8.min(4 * 2));
+        assert_eq!(pending, 4 * 2);
 
         let pending = types::max_pending_batches(2, None, 4);
         assert_eq!(pending, 4);
@@ -581,8 +581,7 @@ mod tests {
 
             let (dir, name) = normalized
                 .rsplit_once('/')
-                .map(|(dir, name)| (dir, name))
-                .unwrap_or((".", normalized.as_str()));
+                .map_or((".", normalized.as_str()), |(dir, name)| (dir, name));
 
             state.add_dir_entry(dir, name, FileSystemEntryKind::File);
             state.ensure_dirs(dir);
@@ -647,7 +646,7 @@ mod tests {
                 state
                     .files
                     .get(file.as_str())
-                    .map(|value| value.to_string().into_boxed_str())
+                    .map(|value| value.clone().into_boxed_str())
                     .ok_or_else(|| ErrorEnvelope::expected(ErrorCode::not_found(), "missing file"))
             })
         }
@@ -1280,11 +1279,11 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::timeout());
         assert_eq!(
-            error.metadata.get("stage").map(|value| value.as_str()),
+            error.metadata.get("stage").map(String::as_str),
             Some("embed")
         );
         assert_eq!(
-            error.metadata.get("operation").map(|value| value.as_str()),
+            error.metadata.get("operation").map(String::as_str),
             Some("index_codebase.embed_batch")
         );
         assert!(error.metadata.contains_key("batchIndex"));
@@ -1326,11 +1325,11 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::timeout());
         assert_eq!(
-            error.metadata.get("stage").map(|value| value.as_str()),
+            error.metadata.get("stage").map(String::as_str),
             Some("insert")
         );
         assert_eq!(
-            error.metadata.get("operation").map(|value| value.as_str()),
+            error.metadata.get("operation").map(String::as_str),
             Some("index_codebase.insert_batch")
         );
         assert!(error.metadata.contains_key("insertTaskIndex"));

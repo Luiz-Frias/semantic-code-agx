@@ -1057,12 +1057,11 @@ mod tests {
             "outputFields": MILVUS_OUTPUT_FIELDS,
             "data": [[0.1, 0.2, 0.3]],
         });
-        let payload = match serde_json::to_string(&search) {
-            Ok(value) => value,
-            Err(_) => {
-                assert!(false, "expected search payload to serialize");
-                return;
-            },
+        let payload = if let Ok(value) = serde_json::to_string(&search) {
+            value
+        } else {
+            assert!(false, "expected search payload to serialize");
+            return;
         };
         assert!(payload.contains("collectionName"));
         assert!(payload.contains("outputFields"));
@@ -1070,12 +1069,11 @@ mod tests {
 
     #[test]
     fn rest_hybrid_search_builds_payload() {
-        let collection = match CollectionName::parse("collection") {
-            Ok(value) => value,
-            Err(_) => {
-                assert!(false, "expected collection name to parse");
-                return;
-            },
+        let collection = if let Ok(value) = CollectionName::parse("collection") {
+            value
+        } else {
+            assert!(false, "expected collection name to parse");
+            return;
         };
 
         let mut dense_params = BTreeMap::new();
@@ -1102,35 +1100,33 @@ mod tests {
             rerank: None,
         };
 
-        let body = match build_hybrid_search_body(
+        let body = if let Ok(value) = build_hybrid_search_body(
             &collection,
             None,
             &[dense, sparse],
             &options,
             &MilvusIndexConfig::default(),
         ) {
-            Ok(value) => value,
-            Err(_) => {
-                assert!(false, "expected hybrid search body to build");
-                return;
-            },
+            value
+        } else {
+            assert!(false, "expected hybrid search body to build");
+            return;
         };
 
-        let search_entries = match body.get("search").and_then(serde_json::Value::as_array) {
-            Some(entries) => entries,
-            None => {
+        let search_entries =
+            if let Some(entries) = body.get("search").and_then(serde_json::Value::as_array) {
+                entries
+            } else {
                 assert!(false, "expected search entries");
                 return;
-            },
-        };
+            };
         assert_eq!(search_entries.len(), 2);
 
-        let payload = match serde_json::to_string(&body) {
-            Ok(value) => value,
-            Err(_) => {
-                assert!(false, "expected hybrid body to serialize");
-                return;
-            },
+        let payload = if let Ok(value) = serde_json::to_string(&body) {
+            value
+        } else {
+            assert!(false, "expected hybrid body to serialize");
+            return;
         };
         assert!(payload.contains("BM25"));
         assert!(payload.contains("COSINE"));

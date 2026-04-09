@@ -7,8 +7,8 @@ use crate::env::{BackendEnv, apply_env_overrides};
 use crate::schema::VectorDbIndexConfig;
 use crate::{
     BackendConfig, DfrrSearchConfig, EmbeddingCacheDiskProvider, EmbeddingRoutingMode,
-    HnswSearchConfig, ValidatedBackendConfig, VectorKernelKind, VectorSearchStrategy,
-    VectorSnapshotFormat,
+    HnswBuildConfig, HnswSearchConfig, ValidatedBackendConfig, VectorKernelKind,
+    VectorSearchStrategy, VectorSnapshotFormat,
 };
 use semantic_code_domain::IndexMode;
 use semantic_code_shared::{ErrorCode, ErrorEnvelope};
@@ -434,6 +434,8 @@ struct VectorDbConfigOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     enable_search_metrics: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    hnsw_build: Option<HnswBuildConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     hnsw_search: Option<HnswSearchConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dfrr_search: Option<DfrrSearchConfig>,
@@ -740,6 +742,9 @@ fn apply_vector_db_overrides(config: &mut BackendConfig, overrides: &VectorDbCon
         &mut mapper.config.vector_db.enable_search_metrics,
         overrides.enable_search_metrics,
     );
+    if overrides.hnsw_build.is_some() {
+        mapper.config.vector_db.hnsw_build = overrides.hnsw_build;
+    }
     if overrides.hnsw_search.is_some() {
         mapper.config.vector_db.hnsw_search = overrides.hnsw_search;
     }

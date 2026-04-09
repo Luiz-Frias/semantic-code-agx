@@ -443,7 +443,14 @@ pub fn derive_chunk_id(input: &ChunkIdInput) -> Result<ChunkId, PrimitiveError> 
         hasher.update(b":");
     }
     hasher.update(input.content.as_bytes());
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
     let hash_prefix: String = hash.chars().take(16).collect();
     let candidate = format!("chunk_{hash_prefix}");
 

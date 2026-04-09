@@ -358,7 +358,7 @@ mod tests {
         let counter = parsed
             .iter()
             .find(|value| value.get("metricType") == Some(&Value::String("counter".to_string())))
-            .ok_or_else(|| "missing counter")?;
+            .ok_or("missing counter")?;
         assert_eq!(
             counter.get("name"),
             Some(&Value::String("test.counter".to_string()))
@@ -367,7 +367,7 @@ mod tests {
         let timer = parsed
             .iter()
             .find(|value| value.get("metricType") == Some(&Value::String("timer".to_string())))
-            .ok_or_else(|| "missing timer")?;
+            .ok_or("missing timer")?;
         assert_eq!(
             timer.get("name"),
             Some(&Value::String("test.timer".to_string()))
@@ -431,7 +431,7 @@ mod tests {
         let captured = base.tags.lock().expect("tags lock").clone();
         let captured = captured.expect("tags missing");
         assert_eq!(
-            captured.get("correlationId").map(|value| value.as_ref()),
+            captured.get("correlationId").map(AsRef::as_ref),
             Some("req_456")
         );
     }

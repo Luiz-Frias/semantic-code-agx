@@ -146,8 +146,7 @@ mod tests {
         manifest_dir
             .parent()
             .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| manifest_dir.to_path_buf())
+            .map_or_else(|| manifest_dir.to_path_buf(), Path::to_path_buf)
     }
 
     fn fixture_path(relative: &str) -> PathBuf {
@@ -196,7 +195,7 @@ mod tests {
             .get("effectiveConfig")
             .and_then(|value| value.get("core"))
             .and_then(|value| value.get("timeoutMs"))
-            .and_then(|value| value.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| std::io::Error::other("missing core.timeoutMs"))?;
         assert_eq!(timeout_ms, 12345);
         Ok(())

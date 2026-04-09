@@ -71,7 +71,7 @@ impl SqliteCache {
                     &key,
                     &vector_json,
                     dimension,
-                    size_bytes,
+                    size_bytes.cast_signed(),
                     now,
                     now,
                 ),
@@ -129,7 +129,7 @@ fn evict_disk_cache(conn: &Connection, max_bytes: u64) -> Result<()> {
         .query_row(
             "SELECT COALESCE(SUM(size_bytes), 0) FROM embeddings",
             [],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0).map(i64::cast_unsigned),
         )
         .map_err(|error| disk_error(&format!("disk cache size failed: {error}")))?;
 
@@ -138,7 +138,7 @@ fn evict_disk_cache(conn: &Connection, max_bytes: u64) -> Result<()> {
             .query_row(
                 "SELECT cache_key, size_bytes FROM embeddings ORDER BY last_accessed_ms ASC LIMIT 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1).map(i64::cast_unsigned)?)),
             )
             .optional()
             .map_err(|error| disk_error(&format!("disk cache eviction scan failed: {error}")))?;

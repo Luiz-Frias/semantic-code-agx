@@ -44,7 +44,8 @@ pub use generation::{
     EXACT_GENERATION_VERSION_V3, ExactGenerationMeta, ExactVectorNormalization,
     GENERATION_ACTIVE_FILE_NAME, GENERATION_BASE_DIR_NAME, GENERATION_CATALOG_DB_FILE_NAME,
     GENERATION_DERIVED_DIR_NAME, GENERATION_KERNELS_DIR_NAME, GENERATIONS_DIR_NAME, GenerationId,
-    PublishedGenerationPaths, read_exact_generation, write_exact_generation,
+    PublishedGenerationKernelSource, PublishedGenerationPaths, read_exact_generation,
+    write_exact_generation,
 };
 pub use mmap::MmapBytes;
 pub use quantization::{QuantizationError, QuantizationParams, Quantizer, quantize_f32_to_u8};
@@ -122,7 +123,7 @@ impl Eq for HnswParams {}
 impl Default for HnswParams {
     fn default() -> Self {
         Self {
-            max_nb_connection: 16,
+            max_nb_connection: 32,
             max_layer: 16,
             ef_construction: 200,
             ef_search: 200,
@@ -386,6 +387,32 @@ pub enum VectorKernelKind {
     FlatScan,
 }
 
+/// Versioned source-path contract used to materialize kernel runtimes.
+///
+/// `segmented_source_v1` is the canonical path for new DFRR-style runtimes.
+/// `legacy_vector_index_v0` is the compatibility path that keeps the existing
+/// `VectorIndex`-centric handoff alive while the stack migrates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorKernelSourcePathKind {
+    /// Deprecated compatibility path based on `VectorIndex`.
+    LegacyVectorIndexV0,
+    /// Canonical source-oriented path for new runtime materialization.
+    #[default]
+    SegmentedSourceV1,
+}
+
+/// Runtime contract currently implemented by a kernel family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorKernelRuntimeContractKind {
+    /// Legacy direct use of `VectorIndex` with no separate ready-state materialization.
+    LegacyVectorIndexV0,
+    /// Legacy `warm(&VectorIndex, ...)` compatibility path with persisted ready-state.
+    LegacyWarmReadyStateV0,
+    /// Canonical materialized runtime contract driven by a source object.
+    MaterializedSourceV1,
+}
+
 /// Loader/runtime capabilities for a concrete kernel family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VectorKernelLoadCapabilities {
@@ -395,9 +422,33 @@ pub struct VectorKernelLoadCapabilities {
     /// Whether the kernel can safely load a snapshot produced by a different
     /// kernel family without forcing a full host-graph rebuild.
     pub tolerates_snapshot_kernel_mismatch: bool,
+    /// Canonical source-path contract for this kernel family.
+    pub canonical_source_path: VectorKernelSourcePathKind,
+    /// Runtime contract currently implemented by this kernel family.
+    pub runtime_contract: VectorKernelRuntimeContractKind,
+}
+
+impl VectorKernelLoadCapabilities {
     /// Whether the kernel supports an explicit warm/materialization lifecycle
     /// with persisted ready-state beyond the base collection snapshot.
-    pub supports_kernel_ready_state: bool,
+    #[must_use]
+    pub const fn supports_kernel_ready_state(self) -> bool {
+        matches!(
+            self.runtime_contract,
+            VectorKernelRuntimeContractKind::LegacyWarmReadyStateV0
+                | VectorKernelRuntimeContractKind::MaterializedSourceV1
+        )
+    }
+
+    /// Whether this kernel family is expected to use the materialized-runtime
+    /// contract rather than calling through the legacy compatibility path.
+    #[must_use]
+    pub const fn supports_materialized_runtime(self) -> bool {
+        matches!(
+            self.runtime_contract,
+            VectorKernelRuntimeContractKind::MaterializedSourceV1
+        )
+    }
 }
 
 impl VectorKernelKind {
@@ -408,17 +459,20 @@ impl VectorKernelKind {
             Self::HnswRs => VectorKernelLoadCapabilities {
                 requires_host_hnsw_graph: true,
                 tolerates_snapshot_kernel_mismatch: false,
-                supports_kernel_ready_state: false,
+                canonical_source_path: VectorKernelSourcePathKind::LegacyVectorIndexV0,
+                runtime_contract: VectorKernelRuntimeContractKind::LegacyVectorIndexV0,
             },
             Self::Dfrr => VectorKernelLoadCapabilities {
                 requires_host_hnsw_graph: false,
                 tolerates_snapshot_kernel_mismatch: true,
-                supports_kernel_ready_state: true,
+                canonical_source_path: VectorKernelSourcePathKind::SegmentedSourceV1,
+                runtime_contract: VectorKernelRuntimeContractKind::LegacyWarmReadyStateV0,
             },
             Self::FlatScan => VectorKernelLoadCapabilities {
                 requires_host_hnsw_graph: false,
                 tolerates_snapshot_kernel_mismatch: true,
-                supports_kernel_ready_state: false,
+                canonical_source_path: VectorKernelSourcePathKind::LegacyVectorIndexV0,
+                runtime_contract: VectorKernelRuntimeContractKind::LegacyVectorIndexV0,
             },
         }
     }
@@ -466,6 +520,116 @@ impl VectorKernelWarmContext {
     }
 }
 
+/// Source-oriented contract for kernel runtime materialization.
+///
+/// This trait complements [`ExactVectorRowSource`] with explicit source-path
+/// versioning. The current stack still relies on `VectorIndex` for many code
+/// paths, but new runtime integrations should converge on this contract.
+pub trait VectorKernelSource: ExactVectorRowSource {
+    /// Versioned source path exposed by this source.
+    fn source_path_kind(&self) -> VectorKernelSourcePathKind;
+
+    /// Stable fingerprint for the source payload.
+    fn source_fingerprint(&self) -> u64
+    where
+        for<'a> Self::Row<'a>: ExactVectorRowView,
+    {
+        self.fingerprint()
+    }
+}
+
+/// Materialized kernel runtime detached from the legacy `VectorIndex` entrypoint.
+pub trait VectorKernelRuntime: Send + Sync {
+    /// Kernel family identifier.
+    fn kind(&self) -> VectorKernelKind;
+
+    /// Search through this materialized runtime using the selected backend strategy.
+    fn search(
+        &self,
+        query: &[f32],
+        limit: usize,
+        backend: VectorSearchBackend,
+    ) -> Result<VectorSearchOutput>;
+
+    /// Search with an optional per-call kernel-specific config override.
+    fn search_with_config_override(
+        &self,
+        query: &[f32],
+        limit: usize,
+        backend: VectorSearchBackend,
+        _config_json: Option<&str>,
+    ) -> Result<VectorSearchOutput> {
+        self.search(query, limit, backend)
+    }
+}
+
+/// Source payload used to warm a kernel while binding it to a concrete index state.
+#[derive(Clone, Copy)]
+pub enum VectorKernelWarmSource<'a> {
+    /// Legacy path backed directly by a `VectorIndex`.
+    LegacyVectorIndex(&'a VectorIndex),
+    /// Canonical source path backed by a published generation bundle.
+    PublishedGeneration(&'a PublishedGenerationKernelSource),
+}
+
+impl VectorKernelWarmSource<'_> {
+    /// Source-path kind carried by this warm source.
+    #[must_use]
+    pub const fn source_path_kind(self) -> VectorKernelSourcePathKind {
+        match self {
+            Self::LegacyVectorIndex(_) => VectorKernelSourcePathKind::LegacyVectorIndexV0,
+            Self::PublishedGeneration(_) => VectorKernelSourcePathKind::SegmentedSourceV1,
+        }
+    }
+}
+
+/// Legacy compatibility runtime backed by a borrowed [`VectorIndex`] and kernel.
+///
+/// This keeps the old `VectorIndex`-centric execution model available behind
+/// the new runtime trait while newer source/materialization paths are added.
+#[derive(Clone, Copy)]
+pub struct LegacyVectorIndexKernelRuntime<'a, K: ?Sized> {
+    kernel: &'a K,
+    index: &'a VectorIndex,
+}
+
+impl<'a, K: ?Sized> LegacyVectorIndexKernelRuntime<'a, K> {
+    /// Build a compatibility runtime over a borrowed kernel + index pair.
+    #[must_use]
+    pub const fn new(kernel: &'a K, index: &'a VectorIndex) -> Self {
+        Self { kernel, index }
+    }
+}
+
+impl<K> VectorKernelRuntime for LegacyVectorIndexKernelRuntime<'_, K>
+where
+    K: VectorKernel + Sync + ?Sized,
+{
+    fn kind(&self) -> VectorKernelKind {
+        self.kernel.kind()
+    }
+
+    fn search(
+        &self,
+        query: &[f32],
+        limit: usize,
+        backend: VectorSearchBackend,
+    ) -> Result<VectorSearchOutput> {
+        self.kernel.search(self.index, query, limit, backend)
+    }
+
+    fn search_with_config_override(
+        &self,
+        query: &[f32],
+        limit: usize,
+        backend: VectorSearchBackend,
+        config_json: Option<&str>,
+    ) -> Result<VectorSearchOutput> {
+        self.kernel
+            .search_with_config_override(self.index, query, limit, backend, config_json)
+    }
+}
+
 /// One row to materialize into a derived V2 HNSW snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotSubsetRow {
@@ -507,6 +671,11 @@ pub trait VectorKernel {
     /// Kernel family identifier.
     fn kind(&self) -> VectorKernelKind;
 
+    /// Canonical source-path contract for this kernel implementation.
+    fn source_path_kind(&self) -> VectorKernelSourcePathKind {
+        self.kind().load_capabilities().canonical_source_path
+    }
+
     /// Search through this kernel using the selected backend strategy.
     fn search(
         &self,
@@ -546,10 +715,30 @@ pub trait VectorKernel {
     /// persistence simply ignore this call.
     fn set_snapshot_dir(&self, _dir: &Path) {}
 
+    /// Materialize a runtime object for repeated searches against one kernel + index pair.
+    ///
+    /// The default implementation is the legacy compatibility path: call
+    /// [`warm`](VectorKernel::warm) and return a borrowed runtime wrapper over
+    /// the same `VectorIndex`. Later source-oriented runtimes can override this.
+    fn materialize_runtime<'a>(
+        &'a self,
+        index: &'a VectorIndex,
+        context: &VectorKernelWarmContext,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Box<dyn VectorKernelRuntime + 'a>>
+    where
+        Self: Sync,
+    {
+        self.warm(index, context, cancellation)?;
+        Ok(Box::new(LegacyVectorIndexKernelRuntime::new(self, index)))
+    }
+
     /// Eagerly materialize any kernel-specific ready-state for this collection.
     ///
-    /// The default implementation is a no-op for kernels whose search path uses
-    /// only the base [`VectorIndex`] data (e.g. host HNSW or flat scan).
+    /// This is the legacy compatibility entrypoint for the
+    /// `legacy_vector_index_v0` path. New kernels should prefer the
+    /// source/runtime traits instead of extending the `VectorIndex`-centric
+    /// handoff indefinitely.
     fn warm(
         &self,
         _index: &VectorIndex,
@@ -557,6 +746,26 @@ pub trait VectorKernel {
         _cancellation: Option<&CancellationToken>,
     ) -> Result<()> {
         Ok(())
+    }
+
+    /// Warm kernel state from a versioned source while binding it to `index`.
+    ///
+    /// The default implementation keeps the legacy behavior and delegates to
+    /// [`warm`](VectorKernel::warm). Kernels that can build ready-state from a
+    /// generation-backed source should override this.
+    fn warm_from_source(
+        &self,
+        index: &VectorIndex,
+        source: VectorKernelWarmSource<'_>,
+        context: &VectorKernelWarmContext,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<()> {
+        match source {
+            VectorKernelWarmSource::LegacyVectorIndex(_) => self.warm(index, context, cancellation),
+            VectorKernelWarmSource::PublishedGeneration(_) => {
+                self.warm(index, context, cancellation)
+            },
+        }
     }
 }
 
@@ -718,6 +927,12 @@ impl ExactVectorRowSource for VectorIndex {
             })
             .collect::<Vec<ExactVectorRowRef<'_>>>()
             .into_iter()
+    }
+}
+
+impl VectorKernelSource for VectorIndex {
+    fn source_path_kind(&self) -> VectorKernelSourcePathKind {
+        VectorKernelSourcePathKind::LegacyVectorIndexV0
     }
 }
 
@@ -1342,6 +1557,16 @@ impl VectorIndex {
         backend: VectorSearchBackend,
     ) -> Result<VectorSearchOutput> {
         kernel.search(self, query, limit, backend)
+    }
+
+    /// Materialize a reusable runtime for one kernel + index pair.
+    pub fn materialize_kernel_runtime<'a>(
+        &'a self,
+        kernel: &'a (dyn VectorKernel + Sync),
+        context: &VectorKernelWarmContext,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Box<dyn VectorKernelRuntime + 'a>> {
+        kernel.materialize_runtime(self, context, cancellation)
     }
 
     fn search_f32_hnsw(
@@ -2544,9 +2769,9 @@ impl Distance<u8> for DistU8Cosine {
         for (lhs, rhs) in va.iter().copied().zip(vb.iter().copied()) {
             let lhs = decode_u8_to_f32(lhs);
             let rhs = decode_u8_to_f32(rhs);
-            dot += lhs * rhs;
-            norm_a += lhs * lhs;
-            norm_b += rhs * rhs;
+            dot = lhs.mul_add(rhs, dot);
+            norm_a = lhs.mul_add(lhs, norm_a);
+            norm_b = rhs.mul_add(rhs, norm_b);
         }
 
         if norm_a <= 0.0 || norm_b <= 0.0 {
@@ -2971,7 +3196,7 @@ fn vector_norm_squared(vector: &[f32], context: &'static str) -> Result<f64> {
             .with_metadata("value", value.to_string()));
         }
         let value = f64::from(value);
-        sum += value * value;
+        sum = value.mul_add(value, sum);
     }
     if !sum.is_finite() {
         return Err(ErrorEnvelope::expected(
@@ -3251,7 +3476,7 @@ mod tests {
         }]);
 
         assert!(result.is_err());
-        let error = result.err().expect("insert should reject tiny vector");
+        let error = result.expect_err("insert should reject tiny vector");
         assert_eq!(
             error.code,
             ErrorCode::new("vector", "vector_norm_too_small")
@@ -3273,7 +3498,7 @@ mod tests {
 
         let result = index.search(&[1e-5, 0.0], 1);
         assert!(result.is_err());
-        let error = result.err().expect("search should reject tiny query");
+        let error = result.expect_err("search should reject tiny query");
         assert_eq!(
             error.code,
             ErrorCode::new("vector", "vector_norm_too_small")
@@ -3446,25 +3671,126 @@ mod tests {
             VectorKernelLoadCapabilities {
                 requires_host_hnsw_graph: true,
                 tolerates_snapshot_kernel_mismatch: false,
-                supports_kernel_ready_state: false,
+                canonical_source_path: VectorKernelSourcePathKind::LegacyVectorIndexV0,
+                runtime_contract: VectorKernelRuntimeContractKind::LegacyVectorIndexV0,
             }
+        );
+        assert!(
+            !VectorKernelKind::HnswRs
+                .load_capabilities()
+                .supports_kernel_ready_state()
+        );
+        assert!(
+            !VectorKernelKind::HnswRs
+                .load_capabilities()
+                .supports_materialized_runtime()
         );
         assert_eq!(
             VectorKernelKind::Dfrr.load_capabilities(),
             VectorKernelLoadCapabilities {
                 requires_host_hnsw_graph: false,
                 tolerates_snapshot_kernel_mismatch: true,
-                supports_kernel_ready_state: true,
+                canonical_source_path: VectorKernelSourcePathKind::SegmentedSourceV1,
+                runtime_contract: VectorKernelRuntimeContractKind::LegacyWarmReadyStateV0,
             }
+        );
+        assert!(
+            VectorKernelKind::Dfrr
+                .load_capabilities()
+                .supports_kernel_ready_state()
+        );
+        assert!(
+            !VectorKernelKind::Dfrr
+                .load_capabilities()
+                .supports_materialized_runtime()
         );
         assert_eq!(
             VectorKernelKind::FlatScan.load_capabilities(),
             VectorKernelLoadCapabilities {
                 requires_host_hnsw_graph: false,
                 tolerates_snapshot_kernel_mismatch: true,
-                supports_kernel_ready_state: false,
+                canonical_source_path: VectorKernelSourcePathKind::LegacyVectorIndexV0,
+                runtime_contract: VectorKernelRuntimeContractKind::LegacyVectorIndexV0,
             }
         );
+        assert!(
+            !VectorKernelKind::FlatScan
+                .load_capabilities()
+                .supports_kernel_ready_state()
+        );
+        assert!(
+            !VectorKernelKind::FlatScan
+                .load_capabilities()
+                .supports_materialized_runtime()
+        );
+    }
+
+    #[test]
+    fn vector_index_reports_legacy_source_path_kind() -> Result<()> {
+        let index = VectorIndex::new(2, HnswParams::default())?;
+        assert_eq!(
+            VectorKernelSource::source_path_kind(&index),
+            VectorKernelSourcePathKind::LegacyVectorIndexV0
+        );
+        assert_eq!(
+            VectorKernelSource::source_fingerprint(&index),
+            index.state_fingerprint()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn materialized_hnsw_runtime_matches_direct_search() -> Result<()> {
+        let mut index = VectorIndex::new(2, HnswParams::default())?;
+        index.insert(vec![
+            VectorRecord {
+                id: "a".into(),
+                vector: vec![1.0, 0.0],
+            },
+            VectorRecord {
+                id: "b".into(),
+                vector: vec![0.0, 1.0],
+            },
+        ])?;
+        let kernel = HnswKernel::new();
+        let context = VectorKernelWarmContext::new("runtime-hnsw", None, false);
+        let runtime = kernel.materialize_runtime(&index, &context, None)?;
+        let via_runtime = runtime.search(&[1.0, 0.0], 2, VectorSearchBackend::F32Hnsw)?;
+        let via_direct = kernel.search(&index, &[1.0, 0.0], 2, VectorSearchBackend::F32Hnsw)?;
+
+        assert_eq!(runtime.kind(), VectorKernelKind::HnswRs);
+        assert_eq!(via_runtime.matches, via_direct.matches);
+        assert_eq!(via_runtime.stats.kernel, via_direct.stats.kernel);
+        assert_eq!(via_runtime.stats.expansions, via_direct.stats.expansions);
+        assert_eq!(via_runtime.stats.extra, via_direct.stats.extra);
+        Ok(())
+    }
+
+    #[test]
+    fn materialized_flat_scan_runtime_matches_direct_search() -> Result<()> {
+        let mut index = VectorIndex::new(2, HnswParams::default())?;
+        index.insert(vec![
+            VectorRecord {
+                id: "a".into(),
+                vector: vec![1.0, 0.0],
+            },
+            VectorRecord {
+                id: "b".into(),
+                vector: vec![0.0, 1.0],
+            },
+        ])?;
+        let kernel = FlatScanKernel;
+        let context = VectorKernelWarmContext::new("runtime-flat", None, false);
+        let runtime = kernel.materialize_runtime(&index, &context, None)?;
+        let via_runtime = runtime.search(&[1.0, 0.0], 2, VectorSearchBackend::F32Hnsw)?;
+        let via_direct = kernel.search(&index, &[1.0, 0.0], 2, VectorSearchBackend::F32Hnsw)?;
+
+        assert_eq!(runtime.kind(), VectorKernelKind::FlatScan);
+        assert_eq!(via_runtime.matches, via_direct.matches);
+        assert_eq!(via_runtime.stats.kernel, via_direct.stats.kernel);
+        assert_eq!(via_runtime.stats.expansions, via_direct.stats.expansions);
+        assert_eq!(via_runtime.stats.extra, via_direct.stats.extra);
+        Ok(())
     }
 
     #[test]
@@ -3632,14 +3958,10 @@ mod tests {
             stats
                 .metadata
                 .get("files.vectors.u8.bin.bytes")
-                .map(|value| value.as_ref()),
+                .map(AsRef::as_ref),
             Some("6")
         );
-        let keys = stats
-            .metadata
-            .keys()
-            .map(|key| key.as_ref())
-            .collect::<Vec<_>>();
+        let keys = stats.metadata.keys().map(AsRef::as_ref).collect::<Vec<_>>();
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         assert_eq!(keys, sorted);
@@ -3672,10 +3994,10 @@ mod tests {
         // Verify graph files were written.
         let graph_file = temp
             .path()
-            .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"));
         let data_file = temp
             .path()
-            .join(format!("{}.hnsw.data", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.data"));
         assert!(
             graph_file.exists(),
             "hnsw graph file should exist: {}",
@@ -3731,10 +4053,10 @@ mod tests {
         )?;
         let graph_file = temp
             .path()
-            .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"));
         let data_file = temp
             .path()
-            .join(format!("{}.hnsw.data", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.data"));
         assert!(
             !graph_file.exists(),
             "DFRR collection snapshots should not persist host HNSW graph dumps"
@@ -3788,7 +4110,7 @@ mod tests {
 
         let graph_file = dest
             .path()
-            .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"));
         assert!(
             graph_file.exists(),
             "derived subset snapshot should persist an HNSW graph"
@@ -3808,7 +4130,7 @@ mod tests {
     /// Regression test: insertion order != sorted order must produce correct
     /// search results after a persisted-graph roundtrip.
     ///
-    /// Before the fix, `ids.json` was written in sorted (BTreeMap) order
+    /// Before the fix, `ids.json` was written in sorted (`BTreeMap`) order
     /// while the HNSW graph preserved insertion-order internal IDs.  Loading
     /// the persisted graph with sorted-order records caused `to_matches()`
     /// to map HNSW internal IDs to the wrong external IDs — producing 0.00
@@ -3891,8 +4213,8 @@ mod tests {
 
         index.write_hnsw_ready_state(&ready_dir)?;
 
-        let graph_file = ready_dir.join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
-        let data_file = ready_dir.join(format!("{}.hnsw.data", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+        let graph_file = ready_dir.join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"));
+        let data_file = ready_dir.join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.data"));
         assert!(
             graph_file.is_file(),
             "expected hnsw graph dump in explicit ready-state dir"
@@ -4006,10 +4328,10 @@ mod tests {
 
         let graph_file = temp
             .path()
-            .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"));
         let data_file = temp
             .path()
-            .join(format!("{}.hnsw.data", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.data"));
         assert!(
             graph_file.exists(),
             "snapshot_v2 should rebuild a clean graph before persisting when tombstones exist"
@@ -4080,7 +4402,7 @@ mod tests {
 
         let mut entries = ids
             .into_iter()
-            .zip(origins.into_iter())
+            .zip(origins)
             .zip(vectors.chunks_exact(dimension))
             .map(|((id, origin), vector)| (id, origin, vector.to_vec()))
             .collect::<Vec<_>>();
@@ -4131,10 +4453,10 @@ mod tests {
         let _meta = index.snapshot_v2(temp.path())?;
         let graph_file = temp
             .path()
-            .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"));
         let data_file = temp
             .path()
-            .join(format!("{}.hnsw.data", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.data"));
         std::fs::remove_file(&graph_file).ok();
         std::fs::remove_file(&data_file).ok();
 
@@ -4169,10 +4491,10 @@ mod tests {
         let _meta = index.snapshot_v2(temp.path())?;
         let graph_file = temp
             .path()
-            .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"));
         let data_file = temp
             .path()
-            .join(format!("{}.hnsw.data", SNAPSHOT_V2_HNSW_GRAPH_BASENAME));
+            .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.data"));
         assert!(
             !graph_file.exists(),
             "graph file should be absent when dump is skipped: {}",
@@ -4317,8 +4639,7 @@ mod tests {
                 vec![1.0, 0.0, 0.5],
             )],
         )
-        .err()
-        .expect("dimension mismatch should fail");
+        .expect_err("dimension mismatch should fail");
         assert!(
             dimension_error.to_string().contains("dimension mismatch"),
             "unexpected dimension error: {dimension_error}"
@@ -4331,8 +4652,7 @@ mod tests {
                 ExactVectorRow::new("b", OriginId::from_usize(1), vec![0.0, 1.0]),
             ],
         )
-        .err()
-        .expect("origin order validation should fail");
+        .expect_err("origin order validation should fail");
         assert!(
             order_error
                 .to_string()

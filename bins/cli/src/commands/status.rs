@@ -231,7 +231,7 @@ fn format_snapshot_storage(config: &CliConfigSummary) -> String {
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
         .map(str::to_string);
-    stripped.map_or_else(|| rendered, std::convert::identity)
+    stripped.unwrap_or(rendered)
 }
 
 fn option_path(path: Option<&std::path::PathBuf>) -> String {

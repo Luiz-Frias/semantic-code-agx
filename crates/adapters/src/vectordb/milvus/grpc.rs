@@ -1600,12 +1600,11 @@ mod tests {
     #[test]
     fn collection_name_enforces_length() {
         let long_name = "a".repeat(260);
-        let name = match CollectionName::parse(long_name.as_str()) {
-            Ok(value) => value,
-            Err(_) => {
-                assert!(false, "expected CollectionName parse to succeed");
-                return;
-            },
+        let name = if let Ok(value) = CollectionName::parse(long_name.as_str()) {
+            value
+        } else {
+            assert!(false, "expected CollectionName parse to succeed");
+            return;
         };
         let error = ensure_collection_name(&name).err();
         assert!(error.is_some());

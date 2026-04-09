@@ -1,7 +1,7 @@
 # =============================================================================
 # CLIPPY CONFIGURATION
 # =============================================================================
-# Lint configuration for the semantic-code-agents-rs workspace.
+# Lint configuration for the semantic-code-agx workspace.
 # Run: cargo clippy --workspace --all-targets -- -D warnings
 # =============================================================================
 

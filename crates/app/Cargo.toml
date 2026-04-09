@@ -22,5 +22,5 @@ tracing = { workspace = true, features = ["attributes"] }
 semantic-code-adapters.workspace = true
 semantic-code-config.workspace = true
 semantic-code-vector.workspace = true
-# semantic-code-testkit.workspace = true  # Internal test doubles
+# semantic-code-testkit.workspace = true  # internal test doubles
 tokio.workspace = true

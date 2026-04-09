@@ -8,7 +8,7 @@ use crate::cli_manifest::{
 };
 use crate::embedding_factory::build_embedding_port_with_telemetry;
 use crate::vectordb_factory::{
-    DfrrPrewarmPlanSummary, build_local_kernel, build_vectordb_port, summarize_dfrr_prewarm_plan,
+    DfrrPrewarmPlanSummary, LocalKernelBuilder, build_vectordb_port, summarize_dfrr_prewarm_plan,
 };
 use crate::{InfraError, InfraResult};
 use semantic_code_adapters::{
@@ -780,11 +780,17 @@ pub fn run_calibrate_local(
 
     // Build kernel and resolve snapshot path.
     let kernel_kind = config.vector_db.effective_vector_kernel();
-    let kernel = build_local_kernel(
-        kernel_kind,
-        config.vector_db.hnsw_search.as_ref(),
-        config.vector_db.dfrr_search.as_ref(),
-    )?;
+    let mut kernel_builder = LocalKernelBuilder::new(kernel_kind);
+    if let Some(hnsw) = config.vector_db.hnsw_search.as_ref() {
+        kernel_builder = kernel_builder.hnsw_search(hnsw);
+    }
+    if let Some(dfrr) = config.vector_db.dfrr_search.as_ref() {
+        kernel_builder = kernel_builder.dfrr_search(dfrr);
+    }
+    if let Some(dim) = config.embedding.dimension {
+        kernel_builder = kernel_builder.embedding_dimension(dim);
+    }
+    let kernel = kernel_builder.build()?;
     let search_backend =
         resolve_vector_search_backend(config.vector_db.effective_search_strategy());
     let snapshot_path = vector_snapshot_path(

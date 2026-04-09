@@ -1,4 +1,4 @@
-# mise.toml - semantic-code-agents-rs
+# mise.toml - semantic-code-agx
 # Unified version management + env vars
 # Docs: https://mise.jdx.dev/
 
@@ -35,13 +35,13 @@ CLIPPY_FLAGS_TEST = "-D warnings -D clippy::allow_attributes_without_reason -W c
 # sccache - caches compilation across branches (huge speedup)
 RUSTC_WRAPPER = "sccache"
 
-# Load secrets from .env if present (API keys for remote embedding providers)
-_.file = [".env", { path = ".env.local", required = false }]
+# Load secrets from .env (API keys, etc.)
+_.file = ".env"
 
 # Auto-start sccache when entering this directory.
 # No-op if already running (~0ms). Ensures RUSTC_WRAPPER=sccache always works.
-[hooks.enter]
-run = "sccache --start-server 2>/dev/null || true"
+[hooks]
+enter = "sccache --start-server 2>/dev/null || true"
 
 [settings.python]
 # Use uv for venv creation when uv.lock exists (no mise Python needed)
@@ -51,7 +51,7 @@ uv_venv_auto = true
 # Python 3.12 (pinned; uv uses this for .venv creation)
 python = "3.12"
 # Rust nightly (edition 2024)
-rust = "nightly-2026-03-01"
+rust = "nightly-2026-04-01"
 just = "latest"
 # Native build tools for optional features (onnx/tokenizers/grpc)
 cmake = "latest"
@@ -61,7 +61,7 @@ protoc = "latest"
 # sccache - shared compilation cache (speeds up branch switches)
 sccache = "latest"
 # bacon - background code checker with TUI
-"cargo:bacon" = "latest"
+# "cargo:bacon" = "latest"  # local dev only: TUI checker
 # SOPS + age - encrypted secrets management
 sops = "latest"
 age = "latest"
@@ -76,8 +76,8 @@ hadolint = "latest"   # Dockerfile linter
 yamllint = "latest"   # YAML linter
 actionlint = "latest" # GitHub Actions workflow linter
 # Profiling & debugging (project-scoped; LLDB requires Homebrew: `brew install llvm`)
-"cargo:samply" = "latest"     # CPU profiler (wraps perf/dtrace)
-# "cargo:ferroscope" = "latest" # MCP debugger server (optional, internal)
+# "cargo:samply" = "latest"     # CPU profiler (wraps perf/dtrace)  # local dev only: CPU profiler
+# "cargo:ferroscope" = "latest" # MCP debugger server (LLDB backend)  # internal: MCP debugger
 
 [tasks.check]
 description = "Run quality checks (fmt + clippy + test-unit)"

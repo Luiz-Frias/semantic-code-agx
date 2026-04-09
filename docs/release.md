@@ -34,7 +34,7 @@ sha256sum -c sca-<version>-<target>.sha256
 ### 1. Install script (from GitHub Releases)
 
 ```bash
-curl -fsSL https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Luiz-Frias/semantic-code-agx/releases/latest/download/install.sh | sh
 ```
 
 Defaults:
@@ -47,7 +47,7 @@ Defaults:
 ### 2. Scoop (Windows) (after first release)
 
 ```powershell
-scoop bucket add semantic-code https://github.com/Luiz-Frias/semantic-code-agents-rs
+scoop bucket add semantic-code https://github.com/Luiz-Frias/semantic-code-agx
 scoop install semantic-code
 ```
 
@@ -60,13 +60,13 @@ scoop update semantic-code
 ### 3. mise (GitHub backend) (after first release)
 
 ```bash
-mise use -g github:Luiz-Frias/semantic-code-agents-rs@latest
+mise use -g github:Luiz-Frias/semantic-code-agx@latest
 ```
 
 Pin a specific version:
 
 ```bash
-mise use -g github:Luiz-Frias/semantic-code-agents-rs@v<version>
+mise use -g github:Luiz-Frias/semantic-code-agx@v<version>
 ```
 
 ### 4. Cargo (from source)

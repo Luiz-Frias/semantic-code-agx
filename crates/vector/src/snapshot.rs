@@ -1000,7 +1000,7 @@ mod tests {
         let written = write_snapshot_v2(
             temp.path(),
             HnswParams::default(),
-            quantization.clone(),
+            quantization,
             2,
             vectors.as_slice(),
         )?;

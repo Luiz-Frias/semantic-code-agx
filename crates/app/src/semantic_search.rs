@@ -994,7 +994,7 @@ mod tests {
         assert!(output.stats.is_none());
         let requests = vectordb.take_hybrid_requests()?;
         assert_eq!(requests.len(), 2);
-        let first = requests.get(0).ok_or_else(|| {
+        let first = requests.first().ok_or_else(|| {
             ErrorEnvelope::unexpected(
                 ErrorCode::internal(),
                 "missing first request",

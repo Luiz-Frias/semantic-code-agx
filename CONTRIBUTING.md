@@ -1,4 +1,4 @@
-# Contributing to semantic-code-agents-rs
+# Contributing to semantic-code-agx
 
 Thank you for your interest in contributing! This document provides guidelines for contributing to the project.
 
@@ -14,8 +14,8 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 ```bash
 # Clone the repository
-git clone https://github.com/Luiz-Frias/semantic-code-agents-rs.git
-cd semantic-code-agents-rs
+git clone https://github.com/Luiz-Frias/semantic-code-agx.git
+cd semantic-code-agx
 
 # Install dependencies using mise
 mise install

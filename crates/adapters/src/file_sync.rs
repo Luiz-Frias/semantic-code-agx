@@ -413,7 +413,14 @@ async fn hash_file(path: &Path) -> Result<String> {
     let bytes = tokio::fs::read(path).await.map_err(ErrorEnvelope::from)?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        }))
 }
 
 fn snapshot_error(
@@ -481,7 +488,7 @@ mod tests {
         let hashes = sync.generate_file_hashes(&[]).await?;
         let dag = LocalFileSync::build_merkle_dag(&hashes);
         let snapshot = SyncSnapshot::from_state(SNAPSHOT_VERSION, &hashes, &dag);
-        let decoded = snapshot.clone().into_state()?;
+        let decoded = snapshot.into_state()?;
         assert_eq!(decoded.0, hashes);
         assert_eq!(decoded.1.serialize(), dag.serialize());
         Ok(())

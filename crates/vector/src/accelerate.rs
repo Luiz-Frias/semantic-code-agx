@@ -66,7 +66,7 @@ fn dot_f32_scalar(a: &[f32], b: &[f32], len: usize) -> f32 {
     let mut acc = 0.0_f32;
     for i in 0..len {
         if let (Some(&av), Some(&bv)) = (a.get(i), b.get(i)) {
-            acc += av * bv;
+            acc = av.mul_add(bv, acc);
         }
     }
     acc

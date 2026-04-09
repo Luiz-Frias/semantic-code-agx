@@ -2,7 +2,7 @@
 
 ## Our Commitment
 
-We are committed to providing a welcoming and inspiring community for all. We pledge that everyone participating in the semantic-code-agents-rs project and its community will experience an environment free of harassment and discrimination.
+We are committed to providing a welcoming and inspiring community for all. We pledge that everyone participating in the semantic-code-agx project and its community will experience an environment free of harassment and discrimination.
 
 ## Our Standards
 

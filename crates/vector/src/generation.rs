@@ -7,11 +7,12 @@
 //! top under namespaced directories.
 
 use crate::{
-    ExactVectorRow, ExactVectorRowSource, ExactVectorRowView, ExactVectorRows, OriginId, Result,
-    VectorKernelKind, fingerprint_exact_rows,
+    ExactVectorRow, ExactVectorRowRef, ExactVectorRowSource, ExactVectorRowView, ExactVectorRows,
+    ExactVectorRowsIter, OriginId, Result, VectorKernelKind, VectorKernelSource,
+    VectorKernelSourcePathKind, fingerprint_exact_rows,
 };
 use crc32fast::Hasher;
-use semantic_code_shared::{ErrorClass, ErrorCode, ErrorEnvelope};
+use semantic_code_shared::{CancellationToken, ErrorClass, ErrorCode, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -209,6 +210,97 @@ impl PublishedGenerationPaths {
     }
 }
 
+/// Kernel source backed directly by one immutable published generation.
+///
+/// This wraps the canonical exact-row base bundle so downstream kernels can
+/// materialize runtimes without first rebuilding a `VectorIndex`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublishedGenerationKernelSource {
+    generation: PublishedGenerationPaths,
+    exact_rows: ExactVectorRows,
+    rows_fingerprint: u64,
+}
+
+impl PublishedGenerationKernelSource {
+    /// Build a generation source from already-owned exact rows.
+    #[must_use]
+    pub fn from_exact_rows(
+        generation: PublishedGenerationPaths,
+        exact_rows: ExactVectorRows,
+    ) -> Self {
+        let rows_fingerprint = exact_rows.fingerprint();
+        Self {
+            generation,
+            exact_rows,
+            rows_fingerprint,
+        }
+    }
+
+    /// Load the canonical exact-row source for one published generation.
+    pub fn load(generation: &PublishedGenerationPaths) -> Result<Self> {
+        Self::load_cancellable(generation, None)
+    }
+
+    /// Load the canonical exact-row source for one published generation,
+    /// observing an optional cancellation token between blocking stages.
+    pub fn load_cancellable(
+        generation: &PublishedGenerationPaths,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Self> {
+        let exact_rows = read_exact_generation_cancellable(generation.base_dir(), cancellation)?;
+        Ok(Self::from_exact_rows(generation.clone(), exact_rows))
+    }
+
+    /// Borrow the generation layout this source was loaded from.
+    #[must_use]
+    pub const fn generation(&self) -> &PublishedGenerationPaths {
+        &self.generation
+    }
+
+    /// Borrow the owned exact rows for compatibility paths that still need them.
+    #[must_use]
+    pub const fn exact_rows(&self) -> &ExactVectorRows {
+        &self.exact_rows
+    }
+}
+
+impl ExactVectorRowSource for PublishedGenerationKernelSource {
+    type Row<'a>
+        = ExactVectorRowRef<'a>
+    where
+        Self: 'a;
+
+    type Iter<'a>
+        = ExactVectorRowsIter<'a>
+    where
+        Self: 'a;
+
+    fn dimension(&self) -> u32 {
+        self.exact_rows.dimension()
+    }
+
+    fn row_count(&self) -> usize {
+        self.exact_rows.row_count()
+    }
+
+    fn rows(&self) -> Self::Iter<'_> {
+        self.exact_rows.rows()
+    }
+
+    fn fingerprint(&self) -> u64
+    where
+        for<'a> Self::Row<'a>: ExactVectorRowView,
+    {
+        self.rows_fingerprint
+    }
+}
+
+impl VectorKernelSource for PublishedGenerationKernelSource {
+    fn source_path_kind(&self) -> VectorKernelSourcePathKind {
+        VectorKernelSourcePathKind::SegmentedSourceV1
+    }
+}
+
 /// Exact base-generation metadata filename.
 pub const EXACT_GENERATION_META_FILE_NAME: &str = "snapshot.meta";
 /// Exact `f32` vector payload filename.
@@ -300,14 +392,31 @@ pub fn write_exact_generation(
 
 /// Read an exact base-generation bundle back into owned canonical rows.
 pub fn read_exact_generation(generation_dir: impl AsRef<Path>) -> Result<ExactVectorRows> {
+    read_exact_generation_cancellable(generation_dir, None)
+}
+
+fn read_exact_generation_cancellable(
+    generation_dir: impl AsRef<Path>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<ExactVectorRows> {
     let generation_dir = generation_dir.as_ref();
+    check_generation_load_cancelled(cancellation, "read-meta")?;
     let meta = read_exact_generation_meta(generation_dir)?;
+    check_generation_load_cancelled(cancellation, "read-ids")?;
     let ids = read_exact_generation_ids(generation_dir)?;
+    check_generation_load_cancelled(cancellation, "read-origins")?;
     let origins = read_exact_generation_origins(generation_dir)?;
+    check_generation_load_cancelled(cancellation, "read-vectors")?;
     let vector_bytes = read_exact_generation_vectors(generation_dir)?;
 
     verify_exact_generation_consistency(&meta, &ids, &origins, vector_bytes.as_slice())?;
-    let exact_rows = decode_exact_generation_rows(&meta, ids, origins, vector_bytes.as_slice())?;
+    let exact_rows = decode_exact_generation_rows_cancellable(
+        &meta,
+        ids,
+        origins,
+        vector_bytes.as_slice(),
+        cancellation,
+    )?;
 
     let fingerprint = fingerprint_exact_rows(
         exact_rows.dimension(),
@@ -330,6 +439,18 @@ fn compute_crc32(bytes: &[u8]) -> u32 {
     let mut hasher = Hasher::new();
     hasher.update(bytes);
     hasher.finalize()
+}
+
+fn check_generation_load_cancelled(
+    cancellation: Option<&CancellationToken>,
+    stage: &'static str,
+) -> Result<()> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(ErrorEnvelope::cancelled(format!(
+            "published generation load cancelled during {stage}"
+        )));
+    }
+    Ok(())
 }
 
 const fn kernel_dir_name(kernel: VectorKernelKind) -> &'static str {
@@ -625,11 +746,12 @@ fn verify_exact_generation_consistency(
     Ok(())
 }
 
-fn decode_exact_generation_rows(
+fn decode_exact_generation_rows_cancellable(
     meta: &ExactGenerationMeta,
     ids: Vec<Box<str>>,
     origins: Vec<u64>,
     vector_bytes: &[u8],
+    cancellation: Option<&CancellationToken>,
 ) -> Result<ExactVectorRows> {
     let dimension = usize::try_from(meta.dimension).map_err(|_| {
         ErrorEnvelope::unexpected(
@@ -643,6 +765,10 @@ fn decode_exact_generation_rows(
     let mut rows = Vec::with_capacity(ids.len());
     let mut chunk_iter = vector_bytes.chunks_exact(size_of::<f32>());
     for (row_index, (id, origin)) in ids.into_iter().zip(origins).enumerate() {
+        if row_index.is_multiple_of(256) {
+            check_generation_load_cancelled(cancellation, "decode-rows")?;
+        }
+
         let mut vector = Vec::with_capacity(dimension);
         for _ in 0..dimension {
             let Some(chunk) = chunk_iter.next() else {
@@ -686,13 +812,14 @@ mod tests {
         CollectionGenerationPaths, EXACT_GENERATION_META_FILE_NAME, ExactVectorNormalization,
         GENERATION_ACTIVE_FILE_NAME, GENERATION_BASE_DIR_NAME, GENERATION_CATALOG_DB_FILE_NAME,
         GENERATION_DERIVED_DIR_NAME, GENERATION_KERNELS_DIR_NAME, GENERATIONS_DIR_NAME,
-        GenerationId, read_exact_generation, write_exact_generation,
+        GenerationId, PublishedGenerationKernelSource, read_exact_generation,
+        write_exact_generation,
     };
     use crate::{
         ExactVectorRow, ExactVectorRowSource, ExactVectorRowView, ExactVectorRows, OriginId,
-        VectorKernelKind,
+        VectorKernelKind, VectorKernelSource, VectorKernelSourcePathKind,
     };
-    use semantic_code_shared::ErrorEnvelope;
+    use semantic_code_shared::{CancellationToken, ErrorEnvelope};
     use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -771,10 +898,85 @@ mod tests {
     }
 
     #[test]
+    fn published_generation_kernel_source_loads_canonical_rows() -> crate::Result<()> {
+        let temp =
+            TempDir::create("published-generation-kernel-source").map_err(ErrorEnvelope::from)?;
+        let layout = CollectionGenerationPaths::new(temp.path());
+        let generation_id = GenerationId::new("gen-rows")?;
+        let generation = layout.generation(&generation_id);
+        std::fs::create_dir_all(generation.base_dir()).map_err(ErrorEnvelope::from)?;
+
+        let rows = ExactVectorRows::new(
+            2,
+            vec![
+                ExactVectorRow::new("a", OriginId::from_usize(0), vec![1.0, 0.0]),
+                ExactVectorRow::new("b", OriginId::from_usize(1), vec![0.0, 1.0]),
+            ],
+        )?;
+        write_exact_generation(generation.base_dir(), &rows)?;
+
+        let source = PublishedGenerationKernelSource::load(&generation)?;
+        assert_eq!(
+            source.source_path_kind(),
+            VectorKernelSourcePathKind::SegmentedSourceV1
+        );
+        assert_eq!(source.source_fingerprint(), rows.fingerprint());
+        assert_eq!(source.generation().generation_id().as_str(), "gen-rows");
+
+        let restored_rows = source
+            .rows()
+            .map(|row| {
+                (
+                    row.id().to_string(),
+                    row.origin().as_usize(),
+                    row.vector().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            restored_rows,
+            vec![
+                ("a".to_string(), 0, vec![1.0, 0.0]),
+                ("b".to_string(), 1, vec![0.0, 1.0]),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn published_generation_kernel_source_load_cancellable_honors_pre_cancelled_token()
+    -> crate::Result<()> {
+        let temp = TempDir::create("published-generation-kernel-source-cancelled")
+            .map_err(ErrorEnvelope::from)?;
+        let layout = CollectionGenerationPaths::new(temp.path());
+        let generation_id = GenerationId::new("gen-cancel")?;
+        let generation = layout.generation(&generation_id);
+        std::fs::create_dir_all(generation.base_dir()).map_err(ErrorEnvelope::from)?;
+
+        let rows = ExactVectorRows::new(
+            2,
+            vec![ExactVectorRow::new(
+                "a",
+                OriginId::from_usize(0),
+                vec![1.0, 0.0],
+            )],
+        )?;
+        write_exact_generation(generation.base_dir(), &rows)?;
+
+        let token = CancellationToken::new();
+        token.cancel();
+        let error = PublishedGenerationKernelSource::load_cancellable(&generation, Some(&token))
+            .expect_err("cancelled token should abort generation source load");
+        assert!(
+            error.is_cancelled(),
+            "expected cancellation error, got: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn generation_id_rejects_path_separators() {
-        let error = GenerationId::new("bad/path")
-            .err()
-            .expect("path separators should be rejected");
+        let error = GenerationId::new("bad/path").expect_err("path separators should be rejected");
         assert!(
             error.to_string().contains("path separators"),
             "unexpected generation-id error: {error}"

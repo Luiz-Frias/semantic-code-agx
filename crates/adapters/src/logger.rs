@@ -227,7 +227,7 @@ mod tests {
         let fields = payload
             .get("fields")
             .and_then(Value::as_object)
-            .ok_or_else(|| "missing fields")?;
+            .ok_or("missing fields")?;
         assert_eq!(
             fields.get("apiKey"),
             Some(&Value::String(REDACTED.to_string()))
@@ -237,7 +237,7 @@ mod tests {
         let error = payload
             .get("error")
             .and_then(Value::as_object)
-            .ok_or_else(|| "missing error")?;
+            .ok_or("missing error")?;
         assert_eq!(
             error.get("token"),
             Some(&Value::String(REDACTED.to_string()))
@@ -245,7 +245,7 @@ mod tests {
         let nested = error
             .get("nested")
             .and_then(Value::as_object)
-            .ok_or_else(|| "missing nested")?;
+            .ok_or("missing nested")?;
         assert_eq!(
             nested.get("password"),
             Some(&Value::String(REDACTED.to_string()))
@@ -273,7 +273,7 @@ mod tests {
         let fields = payload
             .get("fields")
             .and_then(Value::as_object)
-            .ok_or_else(|| "missing fields")?;
+            .ok_or("missing fields")?;
         assert_eq!(
             fields.get("correlationId"),
             Some(&Value::String("req_123".to_string()))

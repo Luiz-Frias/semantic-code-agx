@@ -694,7 +694,7 @@ mod tests {
                 on_progress: Some(Arc::new(move |event| {
                     let mut guard = progress_handle
                         .lock()
-                        .unwrap_or_else(|poison| poison.into_inner());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     guard.push(event);
                 })),
             },

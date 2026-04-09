@@ -1,7 +1,7 @@
 # =============================================================================
 # RUSTFMT CONFIGURATION
 # =============================================================================
-# Formatting rules for the semantic-code-agents-rs workspace.
+# Formatting rules for the semantic-code-agx workspace.
 # Run: cargo fmt --all
 # Check: cargo fmt --all -- --check
 #

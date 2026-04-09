@@ -271,7 +271,7 @@ mod tests {
             query: "hello".to_string(),
             top_k: Some(5),
             threshold: Some(0.42),
-            filter_expr: Some("".to_string()),
+            filter_expr: Some(String::new()),
         };
         let search_json = serde_json::to_string(&search_request)?;
         let parsed: ApiV1SearchRequestDto = serde_json::from_str(&search_json)?;

@@ -1,6 +1,6 @@
 # Architecture Overview
 
-semantic-code-agents-rs is designed as a **hexagonal (ports and adapters) modular monolith** optimized for extensibility, determinism, and clean separation of concerns.
+semantic-code-agx is designed as a **hexagonal (ports and adapters) modular monolith** optimized for extensibility, determinism, and clean separation of concerns.
 
 ## High-Level Architecture
 

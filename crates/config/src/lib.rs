@@ -19,7 +19,8 @@ mod storage;
 pub use schema::{
     BackendConfig, ConfigSchemaError, DfrrBq1Threshold, DfrrBq1ThresholdMode, DfrrQueryStrategy,
     DfrrSearchConfig, EmbeddingCacheDiskProvider, EmbeddingConfig, EmbeddingRoutingMode,
-    HnswSearchConfig, ValidatedBackendConfig, VectorKernelKind, VectorSearchStrategy,
+    HnswBuildConfig, HnswSearchConfig, ValidatedBackendConfig, VectorKernelKind,
+    VectorSearchStrategy,
 };
 
 pub use load::{

@@ -772,7 +772,7 @@ mod tests {
 
     #[test]
     fn spans_from_tree_recurses_into_classes_and_methods() {
-        let code = r#"
+        let code = r"
 struct Calculator;
 
 impl Calculator {
@@ -790,7 +790,7 @@ impl Calculator {
 fn top_level() -> i32 {
     42
 }
-"#;
+";
         let total_lines = line_count(code.lines().count()).expect("code line count");
         let tree = parse_tree(code, Language::Rust, Some("src/lib.rs")).expect("parse tree");
 

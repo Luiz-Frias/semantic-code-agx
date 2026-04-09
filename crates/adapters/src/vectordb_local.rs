@@ -21,14 +21,16 @@ use semantic_code_shared::{
 };
 use semantic_code_vector::{
     CollectionGenerationPaths, ExactVectorRowSource, ExactVectorRowView, HnswParams,
-    PreparedV2Snapshot, QuantizationCache, SNAPSHOT_V2_META_FILE_NAME,
-    SNAPSHOT_V2_VECTORS_FILE_NAME, SnapshotStats, VectorIndex, VectorKernel, VectorKernelKind,
-    VectorKernelWarmContext, VectorRecord, VectorSearchBackend, VectorSnapshotV2LoadOptions,
+    PreparedV2Snapshot, PublishedGenerationKernelSource, QuantizationCache,
+    SNAPSHOT_V2_META_FILE_NAME, SNAPSHOT_V2_VECTORS_FILE_NAME, SnapshotStats, VectorIndex,
+    VectorKernel, VectorKernelKind, VectorKernelSourcePathKind, VectorKernelWarmContext,
+    VectorKernelWarmSource, VectorRecord, VectorSearchBackend, VectorSnapshotV2LoadOptions,
     VectorSnapshotWriteVersion, read_exact_generation, read_metadata,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -296,6 +298,7 @@ struct CollectionLoaderContext {
     dfrr_prewarm_requests: Vec<DfrrReadyStatePrewarmRequest>,
     force_reindex_on_kernel_change: bool,
     search_backend: VectorSearchBackend,
+    hnsw_params: HnswParams,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -352,67 +355,131 @@ pub struct LocalVectorDb {
     checkpoint_delay_ms: Arc<AtomicU64>,
 }
 
-impl LocalVectorDb {
-    /// Create a local vector DB adapter scoped to a codebase root.
-    ///
-    /// The `kernel` is a pre-built concrete kernel (created by the factory).
-    /// The `cancellation` token controls the lifecycle of the internal
-    /// collection loader actor — when cancelled, the actor exits its run loop.
+/// Builder for constructing a [`LocalVectorDb`] from required and optional
+/// config-derived parameters.
+///
+/// Replaces the positional-argument constructors with named, chainable setters
+/// so new parameters can be added without touching existing call sites.
+///
+/// ```ignore
+/// let db = LocalVectorDbBuilder::new(root, kernel, cancel)
+///     .storage_mode(SnapshotStorageMode::Custom(path))
+///     .snapshot_format(VectorSnapshotFormat::V2)
+///     .build()?;
+/// ```
+pub struct LocalVectorDbBuilder {
+    codebase_root: PathBuf,
+    kernel: Arc<dyn VectorKernel + Send + Sync>,
+    cancellation: CancellationToken,
+    storage_mode: SnapshotStorageMode,
+    snapshot_format: VectorSnapshotFormat,
+    snapshot_max_bytes: Option<u64>,
+    force_reindex_on_kernel_change: bool,
+    search_strategy: VectorSearchStrategy,
+    hnsw_build_config: Option<semantic_code_config::HnswBuildConfig>,
+    runtime_dfrr_ready_state: Option<DfrrReadyStateRequirement>,
+    dfrr_prewarm_requests: Vec<DfrrReadyStatePrewarmRequest>,
+}
+
+impl LocalVectorDbBuilder {
+    /// Create a builder with the three required fields.
+    #[must_use]
     pub fn new(
         codebase_root: PathBuf,
-        storage_mode: SnapshotStorageMode,
-        snapshot_format: VectorSnapshotFormat,
-        snapshot_max_bytes: Option<u64>,
         kernel: Arc<dyn VectorKernel + Send + Sync>,
-        force_reindex_on_kernel_change: bool,
-        search_strategy: VectorSearchStrategy,
         cancellation: CancellationToken,
-    ) -> Result<Self> {
-        Self::new_with_dfrr_prewarm(
+    ) -> Self {
+        Self {
             codebase_root,
-            storage_mode,
-            snapshot_format,
-            snapshot_max_bytes,
             kernel,
-            None,
-            Vec::new(),
-            force_reindex_on_kernel_change,
-            search_strategy,
             cancellation,
-        )
+            storage_mode: SnapshotStorageMode::default(),
+            snapshot_format: VectorSnapshotFormat::default(),
+            snapshot_max_bytes: None,
+            force_reindex_on_kernel_change: false,
+            search_strategy: VectorSearchStrategy::default(),
+            hnsw_build_config: None,
+            runtime_dfrr_ready_state: None,
+            dfrr_prewarm_requests: Vec::new(),
+        }
     }
 
-    /// Create a local vector DB adapter with optional DFRR prewarm requirements.
-    ///
-    /// The runtime kernel continues to define normal search behavior, while any
-    /// additional DFRR prewarm requests are only consumed during the publish
-    /// FSM to materialize extra ready-state fingerprints up front.
-    pub fn new_with_dfrr_prewarm(
-        codebase_root: PathBuf,
-        storage_mode: SnapshotStorageMode,
-        snapshot_format: VectorSnapshotFormat,
-        snapshot_max_bytes: Option<u64>,
-        kernel: Arc<dyn VectorKernel + Send + Sync>,
-        runtime_dfrr_ready_state: Option<DfrrReadyStateRequirement>,
-        dfrr_prewarm_requests: Vec<DfrrReadyStatePrewarmRequest>,
-        force_reindex_on_kernel_change: bool,
-        search_strategy: VectorSearchStrategy,
-        cancellation: CancellationToken,
-    ) -> Result<Self> {
+    /// Set the snapshot storage mode.
+    #[must_use]
+    pub fn storage_mode(mut self, mode: SnapshotStorageMode) -> Self {
+        self.storage_mode = mode;
+        self
+    }
+
+    /// Set the snapshot format.
+    #[must_use]
+    pub const fn snapshot_format(mut self, format: VectorSnapshotFormat) -> Self {
+        self.snapshot_format = format;
+        self
+    }
+
+    /// Set the maximum allowed snapshot size in bytes.
+    #[must_use]
+    pub const fn snapshot_max_bytes(mut self, bytes: u64) -> Self {
+        self.snapshot_max_bytes = Some(bytes);
+        self
+    }
+
+    /// Force a full reindex when the kernel kind changes between restarts.
+    #[must_use]
+    pub const fn force_reindex_on_kernel_change(mut self, force: bool) -> Self {
+        self.force_reindex_on_kernel_change = force;
+        self
+    }
+
+    /// Set the vector search strategy.
+    #[must_use]
+    pub const fn search_strategy(mut self, strategy: VectorSearchStrategy) -> Self {
+        self.search_strategy = strategy;
+        self
+    }
+
+    /// Set the HNSW build configuration (graph construction params).
+    #[must_use]
+    pub const fn hnsw_build_config(
+        mut self,
+        config: &semantic_code_config::HnswBuildConfig,
+    ) -> Self {
+        self.hnsw_build_config = Some(*config);
+        self
+    }
+
+    /// Set the runtime DFRR ready-state requirement.
+    #[must_use]
+    pub fn runtime_dfrr_ready_state(mut self, state: DfrrReadyStateRequirement) -> Self {
+        self.runtime_dfrr_ready_state = Some(state);
+        self
+    }
+
+    /// Set additional DFRR prewarm requests to materialize at publish time.
+    #[must_use]
+    pub fn dfrr_prewarm_requests(mut self, requests: Vec<DfrrReadyStatePrewarmRequest>) -> Self {
+        self.dfrr_prewarm_requests = requests;
+        self
+    }
+
+    /// Build the [`LocalVectorDb`]. Consumes the builder.
+    pub fn build(self) -> Result<LocalVectorDb> {
         let provider = VectorDbProviderInfo {
             id: VectorDbProviderId::parse("local").map_err(ErrorEnvelope::from)?,
             name: "Local".into(),
         };
         let loader = CollectionLoaderContext {
-            codebase_root,
-            storage_mode,
-            snapshot_format,
-            snapshot_max_bytes,
-            kernel,
-            runtime_dfrr_ready_state,
-            dfrr_prewarm_requests,
-            force_reindex_on_kernel_change,
-            search_backend: resolve_search_backend(search_strategy),
+            codebase_root: self.codebase_root,
+            storage_mode: self.storage_mode,
+            snapshot_format: self.snapshot_format,
+            snapshot_max_bytes: self.snapshot_max_bytes,
+            kernel: self.kernel,
+            runtime_dfrr_ready_state: self.runtime_dfrr_ready_state,
+            dfrr_prewarm_requests: self.dfrr_prewarm_requests,
+            force_reindex_on_kernel_change: self.force_reindex_on_kernel_change,
+            search_backend: resolve_search_backend(self.search_strategy),
+            hnsw_params: HnswParams::from_build_config(self.hnsw_build_config.as_ref()),
         };
         tracing::debug!(
             runtime_dfrr_ready_state = loader
@@ -425,14 +492,14 @@ impl LocalVectorDb {
         let collections = Arc::new(RwLock::new(HashMap::new()));
         let checkpoint_states = Arc::new(RwLock::new(HashMap::new()));
         let (build_coordinator, _build_join) =
-            CollectionBuildCoordinatorActor::spawn(cancellation.clone());
+            CollectionBuildCoordinatorActor::spawn(self.cancellation.clone());
         let (loader_handle, _loader_join) = CollectionLoaderActor::spawn(
             loader.clone(),
             Arc::clone(&collections),
             Arc::clone(&checkpoint_states),
-            cancellation,
+            self.cancellation,
         );
-        Ok(Self {
+        Ok(LocalVectorDb {
             provider,
             loader,
             collections,
@@ -448,7 +515,9 @@ impl LocalVectorDb {
             checkpoint_delay_ms: Arc::new(AtomicU64::new(0)),
         })
     }
+}
 
+impl LocalVectorDb {
     /// Return whether a local vector kernel is available in this build.
     pub const fn is_kernel_supported(kernel: ConfigVectorKernelKind) -> bool {
         match kernel {
@@ -572,6 +641,7 @@ impl LocalVectorDb {
             collection_name,
             staged.exact_rows.clone(),
             staged.build_host_graph,
+            self.loader.hnsw_params,
             None,
         )
         .await?;
@@ -672,23 +742,61 @@ impl LocalVectorDb {
             return Ok(runtime_index);
         }
 
+        let shared_generation_source = if (self.loader.runtime_kernel_supports_ready_state()
+            && self.loader.runtime_kernel_prefers_generation_source())
+            || self.loader.dfrr_prewarm_requests.iter().any(|request| {
+                request
+                    .kernel
+                    .kind()
+                    .load_capabilities()
+                    .canonical_source_path
+                    == VectorKernelSourcePathKind::SegmentedSourceV1
+            }) {
+            Some(Arc::new(
+                load_generation_kernel_source(collection_name, &generation, None).await?,
+            ))
+        } else {
+            None
+        };
+
         let runtime_index_handle = Arc::new(StdRwLock::new(runtime_index));
         if self.loader.runtime_kernel_supports_ready_state() {
-            warm_collection_kernel_state_at_path(
-                &self.loader,
-                collection_name,
-                Arc::clone(&runtime_index_handle),
-                Some(generation.kernels_dir().to_path_buf()),
-                true,
-                None,
-            )
-            .await?;
+            if self.loader.runtime_kernel_prefers_generation_source() {
+                let Some(source) = shared_generation_source.as_ref() else {
+                    return Err(ErrorEnvelope::unexpected(
+                        ErrorCode::new("vector", "generation_source_missing"),
+                        "shared generation source missing for source-backed kernel warm",
+                        ErrorClass::NonRetriable,
+                    ));
+                };
+                warm_loaded_generation_source_at_path(
+                    Arc::clone(&self.loader.kernel),
+                    collection_name,
+                    Arc::clone(&runtime_index_handle),
+                    Arc::clone(source),
+                    Some(generation.kernels_dir().to_path_buf()),
+                    true,
+                    None,
+                )
+                .await?;
+            } else {
+                warm_collection_kernel_state_at_path(
+                    &self.loader,
+                    collection_name,
+                    Arc::clone(&runtime_index_handle),
+                    Some(generation.kernels_dir().to_path_buf()),
+                    true,
+                    None,
+                )
+                .await?;
+            }
         }
 
         self.prewarm_dfrr_ready_states_for_generation(
             collection_name,
             generation_layout,
             &generation,
+            shared_generation_source,
             Arc::clone(&runtime_index_handle),
         )
         .await?;
@@ -710,9 +818,10 @@ impl LocalVectorDb {
         collection_name: &CollectionName,
         generation_layout: &CollectionGenerationPaths,
         generation: &semantic_code_vector::PublishedGenerationPaths,
+        generation_source: Option<Arc<PublishedGenerationKernelSource>>,
         runtime_index_handle: Arc<StdRwLock<VectorIndex>>,
     ) -> Result<()> {
-        let generation_id = generation.generation_id().clone();
+        let generation_id = generation.generation_id();
         let generation_root = Some(generation.kernels_dir().to_path_buf());
         let total_dfrr_prewarm_states = count_unique_dfrr_prewarm_states(
             self.loader.runtime_dfrr_ready_state.as_ref(),
@@ -733,22 +842,23 @@ impl LocalVectorDb {
 
         if let Some(requirement) = self.loader.runtime_dfrr_ready_state.as_ref() {
             current_dfrr_prewarm_state = current_dfrr_prewarm_state.saturating_add(1);
-            warm_dfrr_ready_state_with_telemetry(
-                Arc::clone(&self.loader.kernel),
-                collection_name,
-                &generation_id,
-                requirement.ready_state_fingerprint.as_ref(),
-                current_dfrr_prewarm_state,
-                total_dfrr_prewarm_states,
-                Arc::clone(&runtime_index_handle),
-                generation_root.clone(),
-            )
-            .await?;
-            record_dfrr_ready_state_for_generation(
-                collection_name,
+            let prefer = self.loader.runtime_kernel_prefers_generation_source();
+            prewarm_and_record(
+                DfrrPrewarmContext {
+                    kernel: Arc::clone(&self.loader.kernel),
+                    collection_name,
+                    generation,
+                    generation_source: generation_source.clone(),
+                    generation_id,
+                    ready_state_fingerprint: requirement.ready_state_fingerprint.as_ref(),
+                    current: current_dfrr_prewarm_state,
+                    total: total_dfrr_prewarm_states,
+                    index: Arc::clone(&runtime_index_handle),
+                    generation_root: generation_root.clone(),
+                    cancellation: None,
+                },
+                prefer,
                 generation_layout,
-                &generation_id,
-                generation,
                 requirement,
             )
             .await?;
@@ -759,30 +869,35 @@ impl LocalVectorDb {
                 .loader
                 .runtime_dfrr_ready_state
                 .as_ref()
-                .is_some_and(|runtime| {
-                    runtime.ready_state_fingerprint == request.requirement.ready_state_fingerprint
+                .is_some_and(|rt| {
+                    rt.ready_state_fingerprint == request.requirement.ready_state_fingerprint
                 })
             {
                 continue;
             }
-
             current_dfrr_prewarm_state = current_dfrr_prewarm_state.saturating_add(1);
-            warm_dfrr_ready_state_with_telemetry(
-                Arc::clone(&request.kernel),
-                collection_name,
-                &generation_id,
-                request.requirement.ready_state_fingerprint.as_ref(),
-                current_dfrr_prewarm_state,
-                total_dfrr_prewarm_states,
-                Arc::clone(&runtime_index_handle),
-                generation_root.clone(),
-            )
-            .await?;
-            record_dfrr_ready_state_for_generation(
-                collection_name,
+            let prefer = request
+                .kernel
+                .kind()
+                .load_capabilities()
+                .canonical_source_path
+                == VectorKernelSourcePathKind::SegmentedSourceV1;
+            prewarm_and_record(
+                DfrrPrewarmContext {
+                    kernel: Arc::clone(&request.kernel),
+                    collection_name,
+                    generation,
+                    generation_source: generation_source.clone(),
+                    generation_id,
+                    ready_state_fingerprint: request.requirement.ready_state_fingerprint.as_ref(),
+                    current: current_dfrr_prewarm_state,
+                    total: total_dfrr_prewarm_states,
+                    index: Arc::clone(&runtime_index_handle),
+                    generation_root: generation_root.clone(),
+                    cancellation: None,
+                },
+                prefer,
                 generation_layout,
-                &generation_id,
-                generation,
                 &request.requirement,
             )
             .await?;
@@ -1256,11 +1371,21 @@ fn write_v2_from_collection(
 /// Contains everything the caller needs to complete the load: the assembled
 /// collection, checkpoint sequence, and flags describing side-effects (v2
 /// rewrites, sidecar migrations) that must happen *outside* the loader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeKernelWarmState {
+    NotWarmed,
+    WarmedFromGenerationSource,
+}
+
 struct CollectionLoadResult {
     collection: LocalCollection,
     checkpoint_sequence: u64,
     /// Snapshot paths (when the storage mode produced them).
     paths: Option<CollectionSnapshotPaths>,
+    /// The runtime kernel was already warmed from the active generation source
+    /// during load, so the later warm stage can skip a redundant rewarm
+    /// unless WAL replay invalidates that state.
+    runtime_kernel_warm_state: RuntimeKernelWarmState,
     /// The on-disk kernel differed from the configured kernel and the caller
     /// had to rebuild the host collection graph for correctness.
     kernel_mismatch_requires_rebuild: bool,
@@ -1326,11 +1451,16 @@ impl CollectionLoaderContext {
         self.kernel
             .kind()
             .load_capabilities()
-            .supports_kernel_ready_state
+            .supports_kernel_ready_state()
     }
 
     fn runtime_dfrr_requires_prewarmed_state(&self) -> bool {
         self.kernel.kind() == VectorKernelKind::Dfrr && self.runtime_dfrr_ready_state.is_some()
+    }
+
+    fn runtime_kernel_prefers_generation_source(&self) -> bool {
+        self.kernel.kind().load_capabilities().canonical_source_path
+            == VectorKernelSourcePathKind::SegmentedSourceV1
     }
 
     fn build_collection_from_snapshot(
@@ -1338,9 +1468,9 @@ impl CollectionLoaderContext {
         snapshot: CollectionSnapshot,
     ) -> Result<LocalCollection> {
         if self.runtime_kernel_requires_host_hnsw_graph() {
-            LocalCollection::from_snapshot(snapshot)
+            LocalCollection::from_snapshot(snapshot, self.hnsw_params)
         } else {
-            LocalCollection::from_snapshot_records_only(snapshot)
+            LocalCollection::from_snapshot_records_only(snapshot, self.hnsw_params)
         }
     }
 
@@ -1431,14 +1561,36 @@ impl CollectionLoaderContext {
                 })?
             },
         )?;
+        let generation_source = Arc::new(PublishedGenerationKernelSource::from_exact_rows(
+            generation.clone(),
+            exact_rows.clone(),
+        ));
+
+        if self.runtime_dfrr_requires_prewarmed_state() {
+            ensure_runtime_dfrr_ready_state_available(self, collection_name, Some(&paths)).await?;
+        }
 
         let build_host_graph = self.runtime_kernel_requires_host_hnsw_graph();
+        // Clone once for the warm step; move original into the load step.
+        // Both callees need ownership for spawn_blocking move closures.
+        // CancellationToken is Arc-based so clone is cheap.
+        let cancellation_for_warm = cancellation.clone();
         let index = load_runtime_index_from_generation_async(
             collection_name,
             &generation,
             exact_rows,
             build_host_graph,
+            self.hnsw_params,
             cancellation,
+        )
+        .await?;
+        let (index, runtime_kernel_warm_state) = warm_generation_runtime_index_if_needed(
+            self,
+            collection_name,
+            &generation,
+            Some(Arc::clone(&generation_source)),
+            index,
+            cancellation_for_warm,
         )
         .await?;
         let collection = LocalCollection::from_index_and_parsed_sidecar(index, sidecar)?;
@@ -1452,6 +1604,7 @@ impl CollectionLoaderContext {
             checkpoint_sequence: collection.last_insert_sequence,
             collection,
             paths: Some(paths),
+            runtime_kernel_warm_state,
             kernel_mismatch_requires_rebuild: false,
             needs_metadata_rewrite: false,
             needs_v2_rebuild: false,
@@ -1546,6 +1699,7 @@ impl CollectionLoaderContext {
             collection,
             checkpoint_sequence,
             paths: Some(paths),
+            runtime_kernel_warm_state: RuntimeKernelWarmState::NotWarmed,
             kernel_mismatch_requires_rebuild: load_plan.kernel_mismatch_requires_rebuild,
             needs_metadata_rewrite: load_plan.needs_metadata_rewrite,
             needs_v2_rebuild: false,
@@ -1633,11 +1787,12 @@ impl CollectionLoaderContext {
             } else {
                 0
             };
-            let collection = LocalCollection::new(dimension, IndexMode::Dense)?;
+            let collection = LocalCollection::new(dimension, IndexMode::Dense, self.hnsw_params)?;
             return Ok(CollectionLoadResult {
                 collection,
                 checkpoint_sequence: 0,
                 paths: self.snapshot_paths(collection_name),
+                runtime_kernel_warm_state: RuntimeKernelWarmState::NotWarmed,
                 kernel_mismatch_requires_rebuild: false,
                 needs_metadata_rewrite: false,
                 needs_v2_rebuild: false,
@@ -1684,6 +1839,7 @@ impl CollectionLoaderContext {
             collection,
             checkpoint_sequence,
             paths: self.snapshot_paths(collection_name),
+            runtime_kernel_warm_state: RuntimeKernelWarmState::NotWarmed,
             kernel_mismatch_requires_rebuild: false,
             needs_metadata_rewrite,
             needs_v2_rebuild,
@@ -1920,9 +2076,13 @@ impl VectorDbPort for LocalVectorDb {
             async move {
                 ctx.ensure_not_cancelled("vectordb_local.create_collection")?;
                 let collection = if db.loader.snapshot_format == VectorSnapshotFormat::V2 {
-                    LocalCollection::new_staging(dimension, IndexMode::Dense)?
+                    LocalCollection::new_staging(
+                        dimension,
+                        IndexMode::Dense,
+                        db.loader.hnsw_params,
+                    )?
                 } else {
-                    LocalCollection::new(dimension, IndexMode::Dense)?
+                    LocalCollection::new(dimension, IndexMode::Dense, db.loader.hnsw_params)?
                 };
                 let mut guard = db.collections.write().await;
                 guard.insert(collection_name.clone(), collection);
@@ -1986,9 +2146,13 @@ impl VectorDbPort for LocalVectorDb {
             async move {
                 ctx.ensure_not_cancelled("vectordb_local.create_hybrid_collection")?;
                 let collection = if db.loader.snapshot_format == VectorSnapshotFormat::V2 {
-                    LocalCollection::new_staging(dimension, IndexMode::Hybrid)?
+                    LocalCollection::new_staging(
+                        dimension,
+                        IndexMode::Hybrid,
+                        db.loader.hnsw_params,
+                    )?
                 } else {
-                    LocalCollection::new(dimension, IndexMode::Hybrid)?
+                    LocalCollection::new(dimension, IndexMode::Hybrid, db.loader.hnsw_params)?
                 };
                 let mut guard = db.collections.write().await;
                 guard.insert(collection_name.clone(), collection);
@@ -2762,7 +2926,7 @@ async fn warm_kernel_ready_state_at_path(
     if !kernel
         .kind()
         .load_capabilities()
-        .supports_kernel_ready_state
+        .supports_kernel_ready_state()
     {
         let guard = index.read().map_err(|_| index_lock_error("read"))?;
         return kernel.warm(&guard, &context, cancellation.as_ref());
@@ -2782,6 +2946,87 @@ async fn warm_kernel_ready_state_at_path(
             &collection_for_task,
         )
     })?
+}
+
+async fn load_generation_kernel_source(
+    collection_name: &CollectionName,
+    generation: &semantic_code_vector::PublishedGenerationPaths,
+    cancellation: Option<CancellationToken>,
+) -> Result<PublishedGenerationKernelSource> {
+    let collection_for_task = collection_name.clone();
+    let generation_for_task = generation.clone();
+    spawn_blocking(move || {
+        PublishedGenerationKernelSource::load_cancellable(
+            &generation_for_task,
+            cancellation.as_ref(),
+        )
+    })
+    .await
+    .map_err(|join_error| {
+        map_spawn_blocking_join_error(
+            &join_error,
+            ErrorCode::new("vector", "generation_source_load_task_failed"),
+            "published generation source load",
+            &collection_for_task,
+        )
+    })?
+}
+
+async fn warm_loaded_generation_source_at_path(
+    kernel: Arc<dyn VectorKernel + Send + Sync>,
+    collection_name: &CollectionName,
+    index: Arc<StdRwLock<VectorIndex>>,
+    source: Arc<PublishedGenerationKernelSource>,
+    snapshot_dir: Option<PathBuf>,
+    allow_persist: bool,
+    cancellation: Option<CancellationToken>,
+) -> Result<()> {
+    let context =
+        VectorKernelWarmContext::new(collection_name.as_str(), snapshot_dir, allow_persist);
+    let collection_for_task = collection_name.clone();
+
+    spawn_blocking(move || {
+        let guard = index.read().map_err(|_| index_lock_error("read"))?;
+        kernel.warm_from_source(
+            &guard,
+            VectorKernelWarmSource::PublishedGeneration(source.as_ref()),
+            &context,
+            cancellation.as_ref(),
+        )
+    })
+    .await
+    .map_err(|join_error| {
+        map_spawn_blocking_join_error(
+            &join_error,
+            ErrorCode::new("vector", "kernel_ready_state_task_failed"),
+            "kernel ready-state warm from generation source",
+            &collection_for_task,
+        )
+    })?
+}
+
+async fn warm_kernel_ready_state_from_generation_source_at_path(
+    kernel: Arc<dyn VectorKernel + Send + Sync>,
+    collection_name: &CollectionName,
+    index: Arc<StdRwLock<VectorIndex>>,
+    generation: &semantic_code_vector::PublishedGenerationPaths,
+    snapshot_dir: Option<PathBuf>,
+    allow_persist: bool,
+    cancellation: Option<CancellationToken>,
+) -> Result<()> {
+    let source = Arc::new(
+        load_generation_kernel_source(collection_name, generation, cancellation.clone()).await?,
+    );
+    warm_loaded_generation_source_at_path(
+        kernel,
+        collection_name,
+        index,
+        source,
+        snapshot_dir,
+        allow_persist,
+        cancellation,
+    )
+    .await
 }
 
 fn count_unique_dfrr_prewarm_states(
@@ -2878,6 +3123,205 @@ async fn warm_dfrr_ready_state_with_telemetry(
             }
         }
     }
+}
+
+/// Shared context for DFRR ready-state prewarm operations.
+struct DfrrPrewarmContext<'a> {
+    kernel: Arc<dyn VectorKernel + Send + Sync>,
+    collection_name: &'a CollectionName,
+    generation: &'a semantic_code_vector::PublishedGenerationPaths,
+    generation_source: Option<Arc<PublishedGenerationKernelSource>>,
+    generation_id: &'a semantic_code_vector::GenerationId,
+    ready_state_fingerprint: &'a str,
+    current: u64,
+    total: u64,
+    index: Arc<StdRwLock<VectorIndex>>,
+    generation_root: Option<PathBuf>,
+    cancellation: Option<CancellationToken>,
+}
+
+async fn warm_dfrr_ready_state_from_generation_source_with_telemetry(
+    ctx: DfrrPrewarmContext<'_>,
+) -> Result<()> {
+    let start = Instant::now();
+    tracing::info!(
+        collection = %ctx.collection_name,
+        generation = ctx.generation_id.as_str(),
+        kernel = ?ctx.kernel.kind(),
+        ready_state_fingerprint = ctx.ready_state_fingerprint,
+        current = ctx.current,
+        total = ctx.total,
+        "dfrr ready-state prewarm started"
+    );
+
+    let collection_name = ctx.collection_name;
+    let generation_id = ctx.generation_id;
+    let ready_state_fingerprint = ctx.ready_state_fingerprint;
+    let current = ctx.current;
+    let total = ctx.total;
+
+    let mut warm_fut: std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+        if let Some(source) = ctx.generation_source {
+            Box::pin(warm_loaded_generation_source_at_path(
+                ctx.kernel,
+                collection_name,
+                ctx.index,
+                source,
+                ctx.generation_root,
+                true,
+                ctx.cancellation,
+            ))
+        } else {
+            Box::pin(warm_kernel_ready_state_from_generation_source_at_path(
+                ctx.kernel,
+                collection_name,
+                ctx.index,
+                ctx.generation,
+                ctx.generation_root,
+                true,
+                ctx.cancellation,
+            ))
+        };
+    let mut ticker = tokio::time::interval(Duration::from_secs(15));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let _ = ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            result = &mut warm_fut => {
+                let elapsed_ms =
+                    u64::try_from(start.elapsed().as_millis()).map_or(u64::MAX, |value| value);
+                match &result {
+                    Ok(()) => tracing::info!(
+                        collection = %collection_name,
+                        generation = generation_id.as_str(),
+                        ready_state_fingerprint,
+                        current,
+                        total,
+                        elapsed_ms,
+                        "dfrr ready-state prewarm completed"
+                    ),
+                    Err(error) => tracing::warn!(
+                        collection = %collection_name,
+                        generation = generation_id.as_str(),
+                        ready_state_fingerprint,
+                        current,
+                        total,
+                        elapsed_ms,
+                        %error,
+                        "dfrr ready-state prewarm failed"
+                    ),
+                }
+                return result;
+            }
+            _ = ticker.tick() => {
+                let elapsed_ms =
+                    u64::try_from(start.elapsed().as_millis()).map_or(u64::MAX, |value| value);
+                tracing::info!(
+                    collection = %collection_name,
+                    generation = generation_id.as_str(),
+                    ready_state_fingerprint,
+                    current,
+                    total,
+                    elapsed_ms,
+                    "dfrr ready-state prewarm still running"
+                );
+            }
+        }
+    }
+}
+
+/// Run a single prewarm + record cycle for one DFRR ready-state requirement.
+async fn prewarm_and_record(
+    ctx: DfrrPrewarmContext<'_>,
+    prefer_source: bool,
+    generation_layout: &CollectionGenerationPaths,
+    requirement: &DfrrReadyStateRequirement,
+) -> Result<()> {
+    let collection_name = ctx.collection_name;
+    let generation_id = ctx.generation_id;
+    let generation = ctx.generation;
+    prewarm_generation_ready_state_request(ctx, prefer_source).await?;
+    record_dfrr_ready_state_for_generation(
+        collection_name,
+        generation_layout,
+        generation_id,
+        generation,
+        requirement,
+    )
+    .await
+}
+
+async fn prewarm_generation_ready_state_request(
+    ctx: DfrrPrewarmContext<'_>,
+    prefer_generation_source: bool,
+) -> Result<()> {
+    if prefer_generation_source {
+        warm_dfrr_ready_state_from_generation_source_with_telemetry(ctx).await
+    } else {
+        warm_dfrr_ready_state_with_telemetry(
+            ctx.kernel,
+            ctx.collection_name,
+            ctx.generation_id,
+            ctx.ready_state_fingerprint,
+            ctx.current,
+            ctx.total,
+            ctx.index,
+            ctx.generation_root,
+        )
+        .await
+    }
+}
+
+async fn warm_generation_runtime_index_if_needed(
+    loader: &CollectionLoaderContext,
+    collection_name: &CollectionName,
+    generation: &semantic_code_vector::PublishedGenerationPaths,
+    generation_source: Option<Arc<PublishedGenerationKernelSource>>,
+    index: VectorIndex,
+    cancellation: Option<CancellationToken>,
+) -> Result<(VectorIndex, RuntimeKernelWarmState)> {
+    if !(loader.runtime_kernel_supports_ready_state()
+        && loader.runtime_kernel_prefers_generation_source())
+    {
+        return Ok((index, RuntimeKernelWarmState::NotWarmed));
+    }
+
+    let runtime_index_handle = Arc::new(StdRwLock::new(index));
+    if let Some(source) = generation_source {
+        warm_loaded_generation_source_at_path(
+            Arc::clone(&loader.kernel),
+            collection_name,
+            Arc::clone(&runtime_index_handle),
+            source,
+            Some(generation.kernels_dir().to_path_buf()),
+            true,
+            cancellation,
+        )
+        .await?;
+    } else {
+        warm_kernel_ready_state_from_generation_source_at_path(
+            Arc::clone(&loader.kernel),
+            collection_name,
+            Arc::clone(&runtime_index_handle),
+            generation,
+            Some(generation.kernels_dir().to_path_buf()),
+            true,
+            cancellation,
+        )
+        .await?;
+    }
+    let runtime_index_handle = Arc::try_unwrap(runtime_index_handle).map_err(|_| {
+        ErrorEnvelope::unexpected(
+            ErrorCode::new("vector", "runtime_index_unwrap_failed"),
+            "runtime index handle still shared after source-backed kernel warm",
+            ErrorClass::NonRetriable,
+        )
+    })?;
+    runtime_index_handle
+        .into_inner()
+        .map(|index| (index, RuntimeKernelWarmState::WarmedFromGenerationSource))
+        .map_err(|_| index_lock_error("into_inner"))
 }
 
 async fn record_dfrr_ready_state_for_generation(
@@ -3060,12 +3504,38 @@ const fn kernel_kind_name(kernel: VectorKernelKind) -> &'static str {
     }
 }
 
+// ── Config → Vector bridge ──────────────────────────────────────────────────
+
+/// Extension trait bridging the config layer (`HnswBuildConfig`) to the vector
+/// layer (`HnswParams`).
+///
+/// Implemented here in the adapter crate because this is the boundary between
+/// configuration and construction — the vector crate has no knowledge of config
+/// types, and the config crate has no knowledge of vector types.
+trait HnswParamsExt {
+    /// Construct `HnswParams` from an optional build config, falling back to
+    /// `HnswParams::default()` for unset fields.
+    fn from_build_config(config: Option<&semantic_code_config::HnswBuildConfig>) -> Self;
+}
+
+impl HnswParamsExt for HnswParams {
+    fn from_build_config(config: Option<&semantic_code_config::HnswBuildConfig>) -> Self {
+        let mut params = Self::default();
+        if let Some(build) = config {
+            params.max_nb_connection = build.max_nb_connection as usize;
+            params.ef_construction = build.ef_construction as usize;
+        }
+        params
+    }
+}
+
 fn build_runtime_index_from_exact_rows(
     rows: &semantic_code_vector::ExactVectorRows,
     build_host_graph: bool,
+    hnsw_params: &HnswParams,
     cancellation: Option<&CancellationToken>,
 ) -> Result<VectorIndex> {
-    let mut index = VectorIndex::new(rows.dimension(), HnswParams::default())?;
+    let mut index = VectorIndex::new(rows.dimension(), *hnsw_params)?;
     let records = rows
         .rows()
         .map(|row| {
@@ -3092,11 +3562,17 @@ async fn build_runtime_index_from_exact_rows_async(
     collection_name: &CollectionName,
     rows: semantic_code_vector::ExactVectorRows,
     build_host_graph: bool,
+    hnsw_params: HnswParams,
     cancellation: Option<CancellationToken>,
 ) -> Result<VectorIndex> {
     let collection_name_for_task = collection_name.clone();
     spawn_blocking(move || {
-        build_runtime_index_from_exact_rows(&rows, build_host_graph, cancellation.as_ref())
+        build_runtime_index_from_exact_rows(
+            &rows,
+            build_host_graph,
+            &hnsw_params,
+            cancellation.as_ref(),
+        )
     })
     .await
     .map_err(|join_error| {
@@ -3114,6 +3590,7 @@ async fn load_runtime_index_from_generation_async(
     generation: &semantic_code_vector::PublishedGenerationPaths,
     rows: semantic_code_vector::ExactVectorRows,
     build_host_graph: bool,
+    hnsw_params: HnswParams,
     cancellation: Option<CancellationToken>,
 ) -> Result<VectorIndex> {
     if build_host_graph {
@@ -3126,7 +3603,7 @@ async fn load_runtime_index_from_generation_async(
             let collection_name_for_task = collection_name.clone();
             let ready_dir_for_task = ready_dir.clone();
             let rows_for_task = rows.clone();
-            let mut params = HnswParams::default();
+            let mut params = hnsw_params;
             params.max_elements = params.max_elements.max(rows_for_task.row_count().max(1));
             let records_with_origins = rows_for_task
                 .rows()
@@ -3172,6 +3649,7 @@ async fn load_runtime_index_from_generation_async(
                         collection_name,
                         rows,
                         true,
+                        hnsw_params,
                         cancellation,
                     )
                     .await;
@@ -3180,8 +3658,14 @@ async fn load_runtime_index_from_generation_async(
         }
     }
 
-    build_runtime_index_from_exact_rows_async(collection_name, rows, build_host_graph, cancellation)
-        .await
+    build_runtime_index_from_exact_rows_async(
+        collection_name,
+        rows,
+        build_host_graph,
+        hnsw_params,
+        cancellation,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -3206,21 +3690,31 @@ enum LocalCollectionMode {
 }
 
 impl LocalCollection {
-    fn new(dimension: u32, index_mode: IndexMode) -> Result<Self> {
-        Self::new_with_mode(dimension, index_mode, LocalCollectionMode::Online)
+    fn new(dimension: u32, index_mode: IndexMode, hnsw_params: HnswParams) -> Result<Self> {
+        Self::new_with_mode(
+            dimension,
+            index_mode,
+            LocalCollectionMode::Online,
+            hnsw_params,
+        )
     }
 
-    fn new_staging(dimension: u32, index_mode: IndexMode) -> Result<Self> {
-        Self::new_with_mode(dimension, index_mode, LocalCollectionMode::Staging)
+    fn new_staging(dimension: u32, index_mode: IndexMode, hnsw_params: HnswParams) -> Result<Self> {
+        Self::new_with_mode(
+            dimension,
+            index_mode,
+            LocalCollectionMode::Staging,
+            hnsw_params,
+        )
     }
 
     fn new_with_mode(
         dimension: u32,
         index_mode: IndexMode,
         mode: LocalCollectionMode,
+        hnsw_params: HnswParams,
     ) -> Result<Self> {
-        let params = HnswParams::default();
-        let index = VectorIndex::new(dimension, params)?;
+        let index = VectorIndex::new(dimension, hnsw_params)?;
         Ok(Self {
             dimension,
             index_mode,
@@ -3373,7 +3867,7 @@ impl LocalCollection {
         })
     }
 
-    fn from_snapshot(snapshot: CollectionSnapshot) -> Result<Self> {
+    fn from_snapshot(snapshot: CollectionSnapshot, hnsw_params: HnswParams) -> Result<Self> {
         let CollectionSnapshot {
             version,
             dimension,
@@ -3382,8 +3876,7 @@ impl LocalCollection {
             checkpoint_sequence,
         } = snapshot;
         validate_local_snapshot_version(version)?;
-        let params = HnswParams::default();
-        let mut index = VectorIndex::new(dimension, params)?;
+        let mut index = VectorIndex::new(dimension, hnsw_params)?;
         let mut documents = BTreeMap::new();
         let mut index_records = Vec::new();
         for record in records {
@@ -3410,7 +3903,10 @@ impl LocalCollection {
         })
     }
 
-    fn from_snapshot_records_only(snapshot: CollectionSnapshot) -> Result<Self> {
+    fn from_snapshot_records_only(
+        snapshot: CollectionSnapshot,
+        hnsw_params: HnswParams,
+    ) -> Result<Self> {
         let CollectionSnapshot {
             version,
             dimension,
@@ -3419,8 +3915,7 @@ impl LocalCollection {
             checkpoint_sequence,
         } = snapshot;
         validate_local_snapshot_version(version)?;
-        let params = HnswParams::default();
-        let mut index = VectorIndex::new(dimension, params)?;
+        let mut index = VectorIndex::new(dimension, hnsw_params)?;
         let mut documents = BTreeMap::new();
         let mut index_records = Vec::new();
         for record in records {
@@ -4662,6 +5157,7 @@ struct LoadStageWalReplayed<'a> {
     checkpoint_sequence: u64,
     wal_replayed: bool,
     paths: Option<CollectionSnapshotPaths>,
+    runtime_kernel_warm_state: RuntimeKernelWarmState,
     needs_metadata_rewrite: bool,
 }
 
@@ -4793,6 +5289,7 @@ impl<'a> LoadStageSnapshotBound<'a> {
             checkpoint_sequence,
             wal_replayed,
             paths: self.load_result.paths,
+            runtime_kernel_warm_state: self.load_result.runtime_kernel_warm_state,
             needs_metadata_rewrite: self.load_result.needs_metadata_rewrite,
         })
     }
@@ -4809,15 +5306,19 @@ impl<'a> LoadStageWalReplayed<'a> {
             .await?;
         }
 
-        warm_collection_kernel_state(
-            &self.actor.loader,
-            self.name,
-            Arc::clone(&self.collection.index),
-            self.paths.as_ref(),
-            !self.wal_replayed,
-            self.cancellation.clone(),
-        )
-        .await?;
+        if self.runtime_kernel_warm_state != RuntimeKernelWarmState::WarmedFromGenerationSource
+            || self.wal_replayed
+        {
+            warm_collection_kernel_state(
+                &self.actor.loader,
+                self.name,
+                Arc::clone(&self.collection.index),
+                self.paths.as_ref(),
+                !self.wal_replayed,
+                self.cancellation.clone(),
+            )
+            .await?;
+        }
 
         if self.needs_metadata_rewrite
             && let Some(ref paths) = self.paths
@@ -5015,7 +5516,7 @@ mod tests {
         for column in 0..dimension {
             let raw = ((seed + 1) * 97 + (column + 1) * 57 + (seed * column + 13) * 17) % 1000;
             let centered = (raw as f32 / 500.0) - 1.0;
-            vector.push(centered + ((seed % 7) as f32 * 0.01));
+            vector.push(((seed % 7) as f32).mul_add(0.01, centered));
         }
         let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
         vector
@@ -5151,19 +5652,16 @@ mod tests {
             ef_search,
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::with_ef_search(ef_search)),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         let collection = CollectionName::parse("ef_search_honored")?;
         let ctx = RequestContext::new_request();
         db.create_collection(&ctx, collection.clone(), 3, None)
@@ -5263,19 +5761,15 @@ mod tests {
             "sca-localdb-paths-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp))
+        .build()?;
         let collection = CollectionName::parse("local_snapshot")?;
         let paths = db.snapshot_paths(&collection).ok_or_else(|| {
             std::io::Error::other("expected snapshot paths for custom storage mode")
@@ -5327,22 +5821,19 @@ mod tests {
             "sca-localdb-wal-sequence-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("wal_sequence")?;
         let ctx = RequestContext::new_request();
 
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
 
         db.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
@@ -5404,19 +5895,15 @@ mod tests {
             "sca-localdb-generation-flush-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         let collection = CollectionName::parse("generation_stage")?;
         let ctx = RequestContext::new_request();
 
@@ -5518,7 +6005,7 @@ mod tests {
         assert!(
             generation
                 .kernel_dir(VectorKernelKind::HnswRs)
-                .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME))
+                .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"))
                 .is_file(),
             "expected generation-scoped hnsw ready-state graph after flush"
         );
@@ -5565,22 +6052,18 @@ mod tests {
             "sca-localdb-generation-restart-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("generation_restart")?;
         let ctx = RequestContext::new_request();
 
-        let initial = LocalVectorDb::new(
+        let initial = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         initial
             .create_collection(&ctx, collection.clone(), 3, None)
             .await?;
@@ -5618,32 +6101,29 @@ mod tests {
         let _ = std::fs::remove_file(
             paths
                 .v2_dir
-                .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME)),
+                .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph")),
         );
         let _ = std::fs::remove_file(
             paths
                 .v2_dir
-                .join(format!("{}.hnsw.data", SNAPSHOT_V2_HNSW_GRAPH_BASENAME)),
+                .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.data")),
         );
         assert!(
             generation
                 .kernel_dir(VectorKernelKind::HnswRs)
-                .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME))
+                .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"))
                 .is_file(),
             "expected generation-scoped hnsw ready-state graph before restart"
         );
         drop(initial);
 
-        let restarted = LocalVectorDb::new(
+        let restarted = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
 
         let response = restarted
             .search(
@@ -5684,22 +6164,19 @@ mod tests {
             "sca-localdb-wal-replay-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("wal_replay")?;
         let ctx = RequestContext::new_request();
 
-        let initial = LocalVectorDb::new(
+        let initial = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         initial.set_checkpoint_delay_for_tests(Duration::from_secs(30));
         initial
             .create_collection(&ctx, collection.clone(), 3, None)
@@ -5726,16 +6203,14 @@ mod tests {
         );
         drop(initial);
 
-        let restarted = LocalVectorDb::new(
+        let restarted = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         let replayed = restarted
             .search(
                 &ctx,
@@ -5770,16 +6245,14 @@ mod tests {
         assert_eq!(snapshot.checkpoint_sequence, Some(1));
         drop(restarted);
 
-        let reopened = LocalVectorDb::new(
+        let reopened = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         let restored = reopened
             .search(
                 &ctx,
@@ -5805,22 +6278,19 @@ mod tests {
             "sca-localdb-wal-gap-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("wal_gap")?;
         let ctx = RequestContext::new_request();
 
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         db.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
         db.insert(
@@ -5854,16 +6324,14 @@ mod tests {
         .await?;
         drop(db);
 
-        let restarted = LocalVectorDb::new(
+        let restarted = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         let error = restarted
             .search(
                 &ctx,
@@ -5901,22 +6369,19 @@ mod tests {
             "sca-localdb-flush-waits-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("flush_waits")?;
         let ctx = RequestContext::new_request();
 
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         db.set_checkpoint_delay_for_tests(Duration::from_millis(150));
         db.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
@@ -5978,21 +6443,18 @@ mod tests {
             "sca-localdb-v2-fallback-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("local_snapshot")?;
         let ctx = RequestContext::new_request();
-        let db_v1 = LocalVectorDb::new(
+        let db_v1 = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
 
         db_v1
             .create_collection(&ctx, collection.clone(), 3, None)
@@ -6020,16 +6482,13 @@ mod tests {
         assert!(!paths.v2_ids.is_file());
         let _ = std::fs::remove_file(paths.generation_layout.active_file());
 
-        let db_v2 = LocalVectorDb::new(
+        let db_v2 = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         let response = db_v2
             .search(
                 &ctx,
@@ -6060,8 +6519,7 @@ mod tests {
             "sca-localdb-v2-repair-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("local_snapshot_repair")?;
         let ctx = RequestContext::new_request();
@@ -6069,16 +6527,14 @@ mod tests {
         // The repair path requires float32 vectors stored in v1 JSON; in pure V2
         // mode those vectors are never persisted to disk, so this test exercises
         // the V1→V2 migration repair scenario.
-        let db_v1 = LocalVectorDb::new(
+        let db_v1 = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         db_v1
             .create_collection(&ctx, collection.clone(), 3, None)
             .await?;
@@ -6102,16 +6558,13 @@ mod tests {
         // Open the same directory as V2 and trigger a load so the V2 companion
         // files (ids.json, vectors.u8.bin, meta.json, records.meta.jsonl) are
         // built from the V1 JSON.
-        let db_v2_init = LocalVectorDb::new(
+        let db_v2_init = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         // A search triggers ensure_loaded → load_via_v1_json → rebuild V2 bundle.
         let _ = db_v2_init
             .search(
@@ -6179,16 +6632,13 @@ mod tests {
         );
         let _ = std::fs::remove_file(paths.generation_layout.active_file());
 
-        let restarted = LocalVectorDb::new(
+        let restarted = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         let response = restarted
             .search(
                 &ctx,
@@ -6229,22 +6679,18 @@ mod tests {
             "sca-localdb-v2-checkpoint-idx-reuse-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("checkpoint_active_restart")?;
         let ctx = RequestContext::new_request();
 
-        let seed = LocalVectorDb::new(
+        let seed = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         seed.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
         seed.insert(
@@ -6261,16 +6707,13 @@ mod tests {
         seed.flush(&ctx, collection.clone()).await?;
         drop(seed);
 
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         let paths = db.snapshot_paths(&collection).ok_or_else(|| {
             std::io::Error::other("expected snapshot paths for custom storage mode")
         })?;
@@ -6344,21 +6787,17 @@ mod tests {
             "sca-localdb-v2-checkpoint-order-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("checkpoint_order")?;
         let ctx = RequestContext::new_request();
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         db.create_collection(&ctx, collection.clone(), 72, None)
             .await?;
 
@@ -6410,22 +6849,19 @@ mod tests {
         assert!(
             paths
                 .v2_dir
-                .join(format!("{}.hnsw.graph", SNAPSHOT_V2_HNSW_GRAPH_BASENAME))
+                .join(format!("{SNAPSHOT_V2_HNSW_GRAPH_BASENAME}.hnsw.graph"))
                 .is_file(),
             "expected persisted HNSW graph for graph-safe snapshot"
         );
 
         drop(db);
-        let restarted = LocalVectorDb::new(
+        let restarted = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         for probe in [41_usize, 48, 62, 24, 63, 71] {
             let query = deterministic_dense_unit_vector(probe, 72);
             let response = restarted
@@ -6457,19 +6893,16 @@ mod tests {
             "sca-localdb-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         let collection = CollectionName::parse("local_snapshot")?;
         let ctx = RequestContext::new_request();
         db.create_collection(&ctx, collection.clone(), 3, None)
@@ -6487,16 +6920,14 @@ mod tests {
         .await?;
         db.flush(&ctx, collection.clone()).await?;
 
-        let restored = LocalVectorDb::new(
+        let restored = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         let response = restored
             .search(
                 &ctx,
@@ -6524,22 +6955,18 @@ mod tests {
             "sca-localdb-kernel-mismatch-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("kernel_mismatch")?;
         let ctx = RequestContext::new_request();
 
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         db.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
 
@@ -6560,16 +6987,13 @@ mod tests {
             )
         })?;
 
-        let restarted = LocalVectorDb::new(
+        let restarted = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         let error = restarted
             .search(
                 &ctx,
@@ -6619,8 +7043,7 @@ mod tests {
             "sca-localdb-kernel-force-reindex-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("kernel_force_reindex")?;
         let ctx = RequestContext::new_request();
@@ -6628,16 +7051,14 @@ mod tests {
         // Use V1 format to persist float32 vectors in v1 JSON.  The
         // force_reindex rebuild path requires those vectors to re-build the HNSW
         // graph; in pure V2 mode vectors are only stored in quantized form.
-        let db_v1 = LocalVectorDb::new(
+        let db_v1 = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         db_v1
             .create_collection(&ctx, collection.clone(), 3, None)
             .await?;
@@ -6660,16 +7081,13 @@ mod tests {
         let _ = std::fs::remove_file(v1_paths.generation_layout.active_file());
         drop(db_v1);
         // Open as V2 and search to build the V2 companion files.
-        let db_v2_init = LocalVectorDb::new(
+        let db_v2_init = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         let _ = db_v2_init
             .search(
                 &ctx,
@@ -6704,16 +7122,14 @@ mod tests {
         })?;
         let _ = std::fs::remove_file(paths.generation_layout.active_file());
 
-        let restarted = LocalVectorDb::new(
+        let restarted = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            true,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .force_reindex_on_kernel_change(true)
+        .build()?;
         let response = restarted
             .search(
                 &ctx,
@@ -6751,22 +7167,18 @@ mod tests {
             "sca-localdb-dfrr-tolerant-load-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("dfrr_tolerant_load")?;
         let ctx = RequestContext::new_request();
 
-        let seed = LocalVectorDb::new(
+        let seed = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         seed.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
         seed.insert(
@@ -6792,16 +7204,10 @@ mod tests {
         drop(seed);
 
         let kernel = Arc::new(TestDfrrKernel::default());
-        let restarted = LocalVectorDb::new(
-            tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
-            kernel.clone(),
-            false,
-            VectorSearchStrategy::F32Hnsw,
-            CancellationToken::new(),
-        )?;
+        let restarted =
+            LocalVectorDbBuilder::new(tmp.clone(), kernel.clone(), CancellationToken::new())
+                .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+                .build()?;
 
         restarted.ensure_loaded(&collection).await?;
         assert_eq!(
@@ -6866,13 +7272,12 @@ mod tests {
             "sca-localdb-kernel-snapshot-dir-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("kernel_snapshot_dir")?;
         let loader = CollectionLoaderContext {
             codebase_root: tmp.clone(),
-            storage_mode: SnapshotStorageMode::Custom(tmp.clone()),
+            storage_mode: SnapshotStorageMode::Custom(tmp),
             snapshot_format: VectorSnapshotFormat::V2,
             snapshot_max_bytes: None,
             kernel: Arc::new(TestDfrrKernel::default()),
@@ -6880,6 +7285,7 @@ mod tests {
             dfrr_prewarm_requests: Vec::new(),
             force_reindex_on_kernel_change: false,
             search_backend: VectorSearchBackend::F32Hnsw,
+            hnsw_params: HnswParams::default(),
         };
         let paths = loader.snapshot_paths(&collection).ok_or_else(|| {
             std::io::Error::other("expected snapshot paths for custom storage mode")
@@ -6911,22 +7317,19 @@ mod tests {
             "sca-localdb-dfrr-v1-records-only-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("dfrr_v1_records_only")?;
         let ctx = RequestContext::new_request();
 
-        let seed = LocalVectorDb::new(
+        let seed = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .snapshot_format(VectorSnapshotFormat::V1)
+        .build()?;
         seed.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
         seed.insert(
@@ -6944,16 +7347,11 @@ mod tests {
         drop(seed);
 
         let kernel = Arc::new(TestDfrrKernel::default());
-        let restarted = LocalVectorDb::new(
-            tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V1,
-            None,
-            kernel.clone(),
-            false,
-            VectorSearchStrategy::F32Hnsw,
-            CancellationToken::new(),
-        )?;
+        let restarted =
+            LocalVectorDbBuilder::new(tmp.clone(), kernel.clone(), CancellationToken::new())
+                .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+                .snapshot_format(VectorSnapshotFormat::V1)
+                .build()?;
         restarted.ensure_loaded(&collection).await?;
 
         let guard = restarted.collections.read().await;
@@ -6996,8 +7394,7 @@ mod tests {
             "sca-localdb-dfrr-warm-cancel-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection_name = CollectionName::parse("dfrr_warm_cancel")?;
         let kernel = Arc::new(TestDfrrKernel::default());
@@ -7011,8 +7408,9 @@ mod tests {
             dfrr_prewarm_requests: Vec::new(),
             force_reindex_on_kernel_change: false,
             search_backend: VectorSearchBackend::F32Hnsw,
+            hnsw_params: HnswParams::default(),
         };
-        let collection = LocalCollection::new(3, IndexMode::Dense)?;
+        let collection = LocalCollection::new(3, IndexMode::Dense, HnswParams::default())?;
         let cancellation = CancellationToken::new();
         cancellation.cancel();
 
@@ -7040,8 +7438,7 @@ mod tests {
             "sca-localdb-dfrr-prewarm-flush-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("dfrr_prewarm_flush")?;
         let ctx = RequestContext::new_request();
@@ -7050,21 +7447,17 @@ mod tests {
             ready_state_fingerprint: "dfrr-fingerprint-a".into(),
             config_json: "{\"efSearch\":64,\"clusterCount\":8}".into(),
         };
-        let db = LocalVectorDb::new_with_dfrr_prewarm(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            None,
-            vec![DfrrReadyStatePrewarmRequest {
-                requirement: requirement.clone(),
-                kernel: prewarm_kernel.clone(),
-            }],
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .dfrr_prewarm_requests(vec![DfrrReadyStatePrewarmRequest {
+            requirement: requirement.clone(),
+            kernel: prewarm_kernel.clone(),
+        }])
+        .build()?;
 
         db.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
@@ -7104,22 +7497,18 @@ mod tests {
             "sca-localdb-dfrr-missing-ready-state-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("dfrr_missing_ready_state")?;
         let ctx = RequestContext::new_request();
 
-        let seed = LocalVectorDb::new(
+        let seed = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
         seed.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
         seed.insert(
@@ -7137,21 +7526,14 @@ mod tests {
         drop(seed);
 
         let kernel = Arc::new(TestDfrrKernel::default());
-        let restarted = LocalVectorDb::new_with_dfrr_prewarm(
-            tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
-            kernel.clone(),
-            Some(DfrrReadyStateRequirement {
-                ready_state_fingerprint: "missing-dfrr-ready-state".into(),
-                config_json: "{\"efSearch\":64,\"clusterCount\":8}".into(),
-            }),
-            Vec::new(),
-            false,
-            VectorSearchStrategy::F32Hnsw,
-            CancellationToken::new(),
-        )?;
+        let restarted =
+            LocalVectorDbBuilder::new(tmp.clone(), kernel.clone(), CancellationToken::new())
+                .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+                .runtime_dfrr_ready_state(DfrrReadyStateRequirement {
+                    ready_state_fingerprint: "missing-dfrr-ready-state".into(),
+                    config_json: "{\"efSearch\":64,\"clusterCount\":8}".into(),
+                })
+                .build()?;
 
         let error = restarted
             .ensure_loaded(&collection)
@@ -7169,8 +7551,7 @@ mod tests {
             "sca-localdb-dfrr-ready-state-reuse-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("dfrr_ready_state_reuse")?;
         let ctx = RequestContext::new_request();
@@ -7179,21 +7560,17 @@ mod tests {
             config_json: "{\"efSearch\":64,\"clusterCount\":8}".into(),
         };
         let seed_prewarm_kernel = Arc::new(TestDfrrKernel::default());
-        let seed = LocalVectorDb::new_with_dfrr_prewarm(
+        let seed = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            None,
-            vec![DfrrReadyStatePrewarmRequest {
-                requirement: requirement.clone(),
-                kernel: seed_prewarm_kernel.clone(),
-            }],
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .dfrr_prewarm_requests(vec![DfrrReadyStatePrewarmRequest {
+            requirement: requirement.clone(),
+            kernel: seed_prewarm_kernel.clone(),
+        }])
+        .build()?;
         seed.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
         seed.insert(
@@ -7212,18 +7589,14 @@ mod tests {
         drop(seed);
 
         let runtime_kernel = Arc::new(TestDfrrKernel::default());
-        let restarted = LocalVectorDb::new_with_dfrr_prewarm(
+        let restarted = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             runtime_kernel.clone(),
-            Some(requirement),
-            Vec::new(),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .runtime_dfrr_ready_state(requirement)
+        .build()?;
 
         restarted.ensure_loaded(&collection).await?;
         assert_eq!(runtime_kernel.warm_calls(), 1);
@@ -7236,21 +7609,17 @@ mod tests {
             "sca-localdb-v2-concurrent-search-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let collection = CollectionName::parse("local_snapshot_concurrent_search")?;
         let ctx = RequestContext::new_request();
-        let db = LocalVectorDb::new(
+        let db = LocalVectorDbBuilder::new(
             tmp.clone(),
-            SnapshotStorageMode::Custom(tmp.clone()),
-            VectorSnapshotFormat::V2,
-            None,
             Arc::new(HnswKernel::new()),
-            false,
-            VectorSearchStrategy::F32Hnsw,
             CancellationToken::new(),
-        )?;
+        )
+        .storage_mode(SnapshotStorageMode::Custom(tmp.clone()))
+        .build()?;
 
         db.create_collection(&ctx, collection.clone(), 3, None)
             .await?;
@@ -7347,8 +7716,7 @@ mod tests {
             "sca-actor-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let loader = CollectionLoaderContext {
             codebase_root: tmp.clone(),
@@ -7360,6 +7728,7 @@ mod tests {
             dfrr_prewarm_requests: Vec::new(),
             force_reindex_on_kernel_change: false,
             search_backend: VectorSearchBackend::F32Hnsw,
+            hnsw_params: HnswParams::default(),
         };
         let collections: Arc<RwLock<HashMap<CollectionName, LocalCollection>>> =
             Arc::new(RwLock::new(HashMap::new()));
@@ -7395,7 +7764,7 @@ mod tests {
 
     #[test]
     fn local_collection_v1_snapshot_and_sidecar_use_active_origin_order() -> Result<()> {
-        let mut collection = LocalCollection::new(3, IndexMode::Dense)?;
+        let mut collection = LocalCollection::new(3, IndexMode::Dense, HnswParams::default())?;
         collection.insert(vec![
             VectorDocumentForInsert {
                 id: "gamma".into(),
@@ -7439,8 +7808,7 @@ mod tests {
             "sca-local-collection-snapshot-order-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         std::fs::create_dir_all(&temp_root).map_err(ErrorEnvelope::from)?;
         let generation_layout = CollectionGenerationPaths::new(temp_root.join("generation"));
@@ -7477,7 +7845,7 @@ mod tests {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        let sidecar_ids = sidecar_ids.iter().map(|id| id.as_ref()).collect::<Vec<_>>();
+        let sidecar_ids = sidecar_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         assert_eq!(
             sidecar_ids, snapshot_ids,
             "v1 auto-migration sidecar must preserve the same canonical record order"
@@ -7493,8 +7861,7 @@ mod tests {
             "sca-sidecar-duplicate-id-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         std::fs::create_dir_all(&temp_root).map_err(ErrorEnvelope::from)?;
         let path = temp_root.join("records.meta.jsonl");

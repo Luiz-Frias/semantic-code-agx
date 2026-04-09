@@ -24,7 +24,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   preflight:
@@ -92,6 +91,35 @@ jobs:
             echo "Proceeding with release build/publish."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  publish-crates:
+    name: Publish to crates.io
+    needs: [preflight]
+    if: needs.preflight.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure SSH for private deps
+        uses: webfactory/ssh-agent@v0.9.0
+        if: env.DFRR_DEPLOY_KEY != ''
+        env:
+          DFRR_DEPLOY_KEY: ${{ secrets.DFRR_DEPLOY_KEY }}
+        with:
+          ssh-private-key: ${{ secrets.DFRR_DEPLOY_KEY }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Publish shared (no internal deps)
+        run: cargo publish -p semantic-code-shared --token ${{ secrets.CRATES_IO_TOKEN }}
+
+      - name: Wait for crates.io index update
+        run: sleep 30
+
+      - name: Publish vector (depends on shared)
+        run: cargo publish -p semantic-code-vector --token ${{ secrets.CRATES_IO_TOKEN }}
+
   build:
     name: Build ${{ matrix.target }}
     needs: preflight
@@ -118,18 +146,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Load SSH key for private git deps
+      - name: Configure SSH for private deps
         uses: webfactory/ssh-agent@v0.9.0
+        if: env.DFRR_DEPLOY_KEY != ''
+        env:
+          DFRR_DEPLOY_KEY: ${{ secrets.DFRR_DEPLOY_KEY }}
         with:
-          ssh-private-key: ${{ secrets.PRIVATE_DEPS_SSH_KEY }}
-
-      - name: Trust github.com for git deps
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          touch ~/.ssh/known_hosts
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          ssh-private-key: ${{ secrets.DFRR_DEPLOY_KEY }}
 
       - name: Install Linux build deps (mold)
         if: runner.os == 'Linux'
@@ -179,7 +202,7 @@ jobs:
           python scripts/release/verify_archive.py --archive "${ARCHIVE}"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: sca-${{ matrix.target }}
           path: dist/*
@@ -195,7 +218,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -227,7 +250,7 @@ jobs:
           ref: main
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -286,7 +309,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

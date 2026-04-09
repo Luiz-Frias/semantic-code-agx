@@ -69,7 +69,13 @@ impl EmbeddingCache {
         hasher.update([0u8]);
         hasher.update(text.as_bytes());
         let hash = hasher.finalize();
-        format!("{hash:x}").into_boxed_str()
+        hash.iter()
+            .fold(String::with_capacity(64), |mut s, b| {
+                use std::fmt::Write;
+                let _ = write!(s, "{b:02x}");
+                s
+            })
+            .into_boxed_str()
     }
 
     /// Read from cache.

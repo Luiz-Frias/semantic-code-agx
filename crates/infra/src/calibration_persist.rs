@@ -212,10 +212,10 @@ fn read_sqlite_ema_row(
              WHERE id = 1",
             [],
             |row| {
-                let calibrated_at_ms = row.get::<_, u64>(0)?;
+                let calibrated_at_ms = row.get::<_, i64>(0)?.cast_unsigned();
                 let alpha = row.get::<_, f32>(1)?;
                 let current_skip_rate = row.get::<_, f32>(2)?;
-                let samples_seen = row.get::<_, u64>(3)?;
+                let samples_seen = row.get::<_, i64>(3)?.cast_unsigned();
                 Ok(SqliteEmaRow {
                     calibrated_at_ms,
                     samples_seen,
@@ -254,10 +254,10 @@ fn write_sqlite_ema_row(
                 current_skip_rate = excluded.current_skip_rate,
                 samples_seen = excluded.samples_seen",
             params![
-                calibrated_at_ms,
+                calibrated_at_ms.cast_signed(),
                 f64::from(ema.alpha),
                 f64::from(ema.current_skip_rate),
-                ema.samples_seen,
+                ema.samples_seen.cast_signed(),
             ],
         )
         .map(|_| ())
@@ -476,10 +476,10 @@ mod tests {
                  WHERE id = 1",
                 [],
                 |row| {
-                    let calibrated_at_ms = row.get::<_, u64>(0)?;
+                    let calibrated_at_ms = row.get::<_, i64>(0)?.cast_unsigned();
                     let alpha = row.get::<_, f32>(1)?;
                     let current_skip_rate = row.get::<_, f32>(2)?;
-                    let samples_seen = row.get::<_, u64>(3)?;
+                    let samples_seen = row.get::<_, i64>(3)?.cast_unsigned();
                     Ok((calibrated_at_ms, alpha, current_skip_rate, samples_seen))
                 },
             )

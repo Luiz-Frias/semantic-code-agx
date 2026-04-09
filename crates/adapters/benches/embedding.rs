@@ -110,10 +110,10 @@ fn run_bench(
 }
 
 fn resolve_model_dir(args: &[String]) -> Option<PathBuf> {
-    if let Some(dir) = parse_path_arg(args, "--model-dir") {
-        if has_assets(&dir) {
-            return Some(dir);
-        }
+    if let Some(dir) = parse_path_arg(args, "--model-dir")
+        && has_assets(&dir)
+    {
+        return Some(dir);
     }
     locate_cached_model_dir()
 }
@@ -153,10 +153,10 @@ fn find_context_dir() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(found) = find_context_dir_from(&cwd) {
-            return Some(found);
-        }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(found) = find_context_dir_from(&cwd)
+    {
+        return Some(found);
     }
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     find_context_dir_from(manifest_dir)

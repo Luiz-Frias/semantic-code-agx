@@ -3,7 +3,8 @@
 use crate::InfraResult;
 use crate::cli_calibration::read_calibration;
 use semantic_code_adapters::{
-    DfrrReadyStatePrewarmRequest, DfrrReadyStateRequirement, FixedDimensionVectorDb, LocalVectorDb,
+    DfrrReadyStatePrewarmRequest, DfrrReadyStateRequirement, FixedDimensionVectorDb,
+    LocalVectorDbBuilder,
 };
 #[cfg(feature = "experimental-dfrr-kernel")]
 use semantic_code_config::DfrrQueryStrategy;
@@ -91,16 +92,26 @@ pub async fn build_vectordb_port(
             } else {
                 config.vector_db.dfrr_search.as_ref()
             };
-            let kernel = build_local_kernel(
+            let mut kernel_builder = LocalKernelBuilder::new(kernel_kind);
+            if let Some(hnsw) = config.vector_db.hnsw_search.as_ref() {
+                kernel_builder = kernel_builder.hnsw_search(hnsw);
+            }
+            if let Some(dfrr) = effective_dfrr_search {
+                kernel_builder = kernel_builder.dfrr_search(dfrr);
+            }
+            if let Some(dim) = config.embedding.dimension {
+                kernel_builder = kernel_builder.embedding_dimension(dim);
+            }
+            let kernel = kernel_builder.build()?;
+            let runtime_dfrr_ready_state = build_runtime_dfrr_ready_state_requirement(
                 kernel_kind,
-                config.vector_db.hnsw_search.as_ref(),
                 effective_dfrr_search,
+                config.embedding.dimension,
             )?;
-            let runtime_dfrr_ready_state =
-                build_runtime_dfrr_ready_state_requirement(kernel_kind, effective_dfrr_search)?;
             let dfrr_prewarm_requests = build_dfrr_prewarm_requests(
                 config.vector_db.dfrr_prewarm_searches.as_slice(),
                 runtime_dfrr_ready_state.as_ref(),
+                config.embedding.dimension,
             )?;
             if kernel_kind != VectorKernelKind::HnswRs {
                 tracing::warn!(
@@ -114,18 +125,26 @@ pub async fn build_vectordb_port(
                     "vectorDb.searchStrategy uses an experimental local search path"
                 );
             }
-            let adapter = LocalVectorDb::new_with_dfrr_prewarm(
+            let mut builder = LocalVectorDbBuilder::new(
                 codebase_root.to_path_buf(),
-                snapshot_storage,
-                config.vector_db.snapshot_format,
-                config.vector_db.snapshot_max_bytes,
                 kernel,
-                runtime_dfrr_ready_state,
-                dfrr_prewarm_requests,
-                config.vector_db.force_reindex_on_kernel_change,
-                search_strategy,
                 CancellationToken::new(),
-            )?;
+            )
+            .storage_mode(snapshot_storage)
+            .snapshot_format(config.vector_db.snapshot_format)
+            .force_reindex_on_kernel_change(config.vector_db.force_reindex_on_kernel_change)
+            .search_strategy(search_strategy)
+            .dfrr_prewarm_requests(dfrr_prewarm_requests);
+            if let Some(max_bytes) = config.vector_db.snapshot_max_bytes {
+                builder = builder.snapshot_max_bytes(max_bytes);
+            }
+            if let Some(state) = runtime_dfrr_ready_state {
+                builder = builder.runtime_dfrr_ready_state(state);
+            }
+            if let Some(hnsw) = config.vector_db.hnsw_build.as_ref() {
+                builder = builder.hnsw_build_config(hnsw);
+            }
+            let adapter = builder.build()?;
             Ok(wrap_vectordb_fixed(config.embedding.dimension, adapter))
         },
         ProviderKind::MilvusGrpc => build_milvus_grpc(config).await,
@@ -142,11 +161,15 @@ pub fn summarize_dfrr_prewarm_plan(
     } else {
         None
     };
-    let runtime_requirement =
-        build_runtime_dfrr_ready_state_requirement(kernel_kind, effective_dfrr_search)?;
+    let runtime_requirement = build_runtime_dfrr_ready_state_requirement(
+        kernel_kind,
+        effective_dfrr_search,
+        config.embedding.dimension,
+    )?;
     let prewarm_requests = build_dfrr_prewarm_requests(
         config.vector_db.dfrr_prewarm_searches.as_slice(),
         runtime_requirement.as_ref(),
+        config.embedding.dimension,
     )?;
 
     let mut unique_ready_states = Vec::new();
@@ -164,42 +187,124 @@ pub fn summarize_dfrr_prewarm_plan(
     })
 }
 
-/// Build a concrete `VectorKernel` trait object from the config-level kernel kind.
-pub fn build_local_kernel(
+/// Builder for constructing a `VectorKernel` from config.
+///
+/// Named fields eliminate positional ambiguity and `None` pollution.
+/// New build-time parameters can be added without touching existing call sites.
+///
+/// ```ignore
+/// let kernel = LocalKernelBuilder::new(VectorKernelKind::Dfrr)
+///     .dfrr_search(&search_config)
+///     .embedding_dimension(384)
+///     .build()?;
+/// ```
+pub struct LocalKernelBuilder<'a> {
     kind: VectorKernelKind,
-    hnsw_search: Option<&HnswSearchConfig>,
-    dfrr_search: Option<&DfrrSearchConfig>,
-) -> InfraResult<Arc<dyn VectorKernel + Send + Sync>> {
-    match kind {
-        VectorKernelKind::HnswRs => {
-            let kernel = hnsw_search.map_or_else(HnswKernel::new, |config| {
-                HnswKernel::with_ef_search(config.ef_search as usize)
-            });
-            Ok(Arc::new(kernel))
-        },
-        VectorKernelKind::Dfrr => build_dfrr_kernel(dfrr_search),
-        VectorKernelKind::FlatScan => Ok(Arc::new(FlatScanKernel)),
+    hnsw_search: Option<&'a HnswSearchConfig>,
+    dfrr_search: Option<&'a DfrrSearchConfig>,
+    embedding_dimension: Option<u32>,
+}
+
+impl<'a> LocalKernelBuilder<'a> {
+    /// Start building a kernel of the given kind.
+    #[must_use]
+    pub const fn new(kind: VectorKernelKind) -> Self {
+        Self {
+            kind,
+            hnsw_search: None,
+            dfrr_search: None,
+            embedding_dimension: None,
+        }
+    }
+
+    /// Set the HNSW search configuration.
+    #[must_use]
+    pub const fn hnsw_search(mut self, config: &'a HnswSearchConfig) -> Self {
+        self.hnsw_search = Some(config);
+        self
+    }
+
+    /// Set the DFRR search configuration.
+    #[must_use]
+    pub const fn dfrr_search(mut self, config: &'a DfrrSearchConfig) -> Self {
+        self.dfrr_search = Some(config);
+        self
+    }
+
+    /// Set the embedding dimension (required for shadow PQ).
+    #[must_use]
+    pub const fn embedding_dimension(mut self, dim: u32) -> Self {
+        self.embedding_dimension = Some(dim);
+        self
+    }
+
+    /// Build the kernel. Dispatches to the appropriate backend.
+    pub fn build(self) -> InfraResult<Arc<dyn VectorKernel + Send + Sync>> {
+        match self.kind {
+            VectorKernelKind::HnswRs => {
+                let kernel = self.hnsw_search.map_or_else(HnswKernel::new, |config| {
+                    HnswKernel::with_ef_search(config.ef_search as usize)
+                });
+                Ok(Arc::new(kernel))
+            },
+            VectorKernelKind::Dfrr => build_dfrr_kernel(self.dfrr_search, self.embedding_dimension),
+            VectorKernelKind::FlatScan => Ok(Arc::new(FlatScanKernel)),
+        }
     }
 }
 
 #[cfg(feature = "experimental-dfrr-kernel")]
 fn build_dfrr_kernel(
     dfrr_search: Option<&DfrrSearchConfig>,
+    embedding_dimension: Option<u32>,
 ) -> InfraResult<Arc<dyn VectorKernel + Send + Sync>> {
-    let config = resolve_dfrr_kernel_config(dfrr_search)?;
+    let config = resolve_dfrr_kernel_config(dfrr_search, embedding_dimension)?;
     Ok(Arc::new(DfrrKernel::new(config)))
 }
 
 #[cfg(feature = "experimental-dfrr-kernel")]
 fn resolve_dfrr_kernel_config(
     dfrr_search: Option<&DfrrSearchConfig>,
+    embedding_dimension: Option<u32>,
 ) -> InfraResult<DfrrKernelConfig> {
-    dfrr_search.map_or_else(|| Ok(DfrrKernelConfig::default()), build_dfrr_kernel_config)
+    dfrr_search.map_or_else(
+        || Ok(DfrrKernelConfig::default()),
+        |search| build_dfrr_kernel_config(search, embedding_dimension),
+    )
 }
 
 #[cfg(feature = "experimental-dfrr-kernel")]
-fn build_dfrr_kernel_config(search: &DfrrSearchConfig) -> InfraResult<DfrrKernelConfig> {
-    use semantic_code_dfrr_hnsw::{ClusteringConfig, DfrrConfig};
+fn build_dfrr_kernel_config(
+    search: &DfrrSearchConfig,
+    embedding_dimension: Option<u32>,
+) -> InfraResult<DfrrKernelConfig> {
+    use semantic_code_dfrr_hnsw::{
+        ClusteringConfig, DfrrConfig, DfrrVectorRuntimePathKind, ShadowPQConfig,
+    };
+
+    let shadow_pq = if search.shadow_pq_enabled {
+        let dim = embedding_dimension.ok_or_else(|| {
+            ErrorEnvelope::expected(
+                ErrorCode::new("config", "shadow_pq_missing_dimension"),
+                "shadow PQ requires embedding.dimension to be set explicitly",
+            )
+            .with_metadata("field", "embedding.dimension")
+        })? as usize;
+        let mut shadow = ShadowPQConfig::for_dimension(dim).map_err(|error| {
+            ErrorEnvelope::expected(
+                ErrorCode::new("config", "shadow_pq_dimension_incompatible"),
+                format!(
+                    "embedding dimension {dim} is incompatible with PQ \
+                     (must be divisible by 8): {error}"
+                ),
+            )
+            .with_metadata("dimension", dim.to_string())
+        })?;
+        shadow.sample_rate = f32::from(search.shadow_pq_sample_pct) / 100.0;
+        Some(shadow)
+    } else {
+        None
+    };
 
     Ok(DfrrKernelConfig {
         loop_config: build_dfrr_loop_config(search)?,
@@ -209,6 +314,8 @@ fn build_dfrr_kernel_config(search: &DfrrSearchConfig) -> InfraResult<DfrrKernel
             query_strategy: build_dfrr_query_strategy(search),
             ..ClusteringConfig::default()
         },
+        vector_runtime_path: DfrrVectorRuntimePathKind::SegmentedSourceV1,
+        shadow_pq,
     })
 }
 
@@ -349,6 +456,7 @@ fn invalid_dfrr_search_field_without_value(
 #[cfg(not(feature = "experimental-dfrr-kernel"))]
 fn build_dfrr_kernel(
     _dfrr_search: Option<&DfrrSearchConfig>,
+    _embedding_dimension: Option<u32>,
 ) -> InfraResult<Arc<dyn VectorKernel + Send + Sync>> {
     Err(ErrorEnvelope::expected(
         ErrorCode::new("vector", "kernel_unsupported"),
@@ -361,12 +469,13 @@ fn build_dfrr_kernel(
 fn build_runtime_dfrr_ready_state_requirement(
     kernel_kind: VectorKernelKind,
     dfrr_search: Option<&DfrrSearchConfig>,
+    embedding_dimension: Option<u32>,
 ) -> InfraResult<Option<DfrrReadyStateRequirement>> {
     if kernel_kind != VectorKernelKind::Dfrr {
         return Ok(None);
     }
 
-    let config = resolve_dfrr_kernel_config(dfrr_search)?;
+    let config = resolve_dfrr_kernel_config(dfrr_search, embedding_dimension)?;
     let fingerprint = config.ready_state_config_fingerprint().to_string();
     let search_config_json = serde_json::to_string_pretty(
         &dfrr_search.copied().unwrap_or_default(),
@@ -385,9 +494,14 @@ fn build_runtime_dfrr_ready_state_requirement(
 }
 
 #[cfg(not(feature = "experimental-dfrr-kernel"))]
-fn build_runtime_dfrr_ready_state_requirement(
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "signature matches the feature-enabled variant to keep call sites cfg-free"
+)]
+const fn build_runtime_dfrr_ready_state_requirement(
     _kernel_kind: VectorKernelKind,
     _dfrr_search: Option<&DfrrSearchConfig>,
+    _embedding_dimension: Option<u32>,
 ) -> InfraResult<Option<DfrrReadyStateRequirement>> {
     Ok(None)
 }
@@ -396,6 +510,7 @@ fn build_runtime_dfrr_ready_state_requirement(
 fn build_dfrr_prewarm_requests(
     searches: &[DfrrSearchConfig],
     runtime_requirement: Option<&DfrrReadyStateRequirement>,
+    embedding_dimension: Option<u32>,
 ) -> InfraResult<Vec<DfrrReadyStatePrewarmRequest>> {
     use std::collections::BTreeSet;
 
@@ -406,7 +521,7 @@ fn build_dfrr_prewarm_requests(
     }
 
     for search in searches {
-        let config = resolve_dfrr_kernel_config(Some(search))?;
+        let config = resolve_dfrr_kernel_config(Some(search), embedding_dimension)?;
         let fingerprint = config
             .ready_state_config_fingerprint()
             .to_string()
@@ -426,7 +541,7 @@ fn build_dfrr_prewarm_requests(
                 ready_state_fingerprint: fingerprint,
                 config_json: config_json.into_boxed_str(),
             },
-            kernel: build_dfrr_kernel(Some(search))?,
+            kernel: build_dfrr_kernel(Some(search), embedding_dimension)?,
         });
     }
 
@@ -437,6 +552,7 @@ fn build_dfrr_prewarm_requests(
 fn build_dfrr_prewarm_requests(
     searches: &[DfrrSearchConfig],
     _runtime_requirement: Option<&DfrrReadyStateRequirement>,
+    _embedding_dimension: Option<u32>,
 ) -> InfraResult<Vec<DfrrReadyStatePrewarmRequest>> {
     if searches.is_empty() {
         return Ok(Vec::new());
@@ -684,7 +800,7 @@ mod tests {
 
     #[test]
     fn build_local_kernel_hnsw_rs_always_succeeds() {
-        let kernel = build_local_kernel(VectorKernelKind::HnswRs, None, None);
+        let kernel = LocalKernelBuilder::new(VectorKernelKind::HnswRs).build();
         assert!(kernel.is_ok());
         assert_eq!(
             kernel.as_ref().map(|k| k.kind()).ok(),
@@ -694,7 +810,7 @@ mod tests {
 
     #[test]
     fn build_local_kernel_flat_scan_always_succeeds() {
-        let kernel = build_local_kernel(VectorKernelKind::FlatScan, None, None);
+        let kernel = LocalKernelBuilder::new(VectorKernelKind::FlatScan).build();
         assert!(kernel.is_ok());
         assert_eq!(
             kernel.as_ref().map(|k| k.kind()).ok(),
@@ -723,7 +839,10 @@ mod tests {
             ..DfrrSearchConfig::default()
         };
 
-        let result = build_local_kernel(VectorKernelKind::Dfrr, None, Some(&dfrr_search));
+        let result = LocalKernelBuilder::new(VectorKernelKind::Dfrr)
+            .dfrr_search(&dfrr_search)
+            .embedding_dimension(384)
+            .build();
         if cfg!(feature = "experimental-dfrr-kernel") {
             assert!(result.is_ok());
             assert_eq!(
@@ -778,18 +897,22 @@ mod tests {
             ..base
         };
 
-        let base_requirement =
-            build_runtime_dfrr_ready_state_requirement(VectorKernelKind::Dfrr, Some(&base))?
-                .ok_or_else(|| {
-                    ErrorEnvelope::unexpected(
-                        ErrorCode::new("vector", "dfrr_prewarm_requirement_missing"),
-                        "expected DFRR ready-state requirement",
-                        semantic_code_shared::ErrorClass::NonRetriable,
-                    )
-                })?;
+        let base_requirement = build_runtime_dfrr_ready_state_requirement(
+            VectorKernelKind::Dfrr,
+            Some(&base),
+            Some(384),
+        )?
+        .ok_or_else(|| {
+            ErrorEnvelope::unexpected(
+                ErrorCode::new("vector", "dfrr_prewarm_requirement_missing"),
+                "expected DFRR ready-state requirement",
+                semantic_code_shared::ErrorClass::NonRetriable,
+            )
+        })?;
         let changed_requirement = build_runtime_dfrr_ready_state_requirement(
             VectorKernelKind::Dfrr,
             Some(&changed_query_ef),
+            Some(384),
         )?
         .ok_or_else(|| {
             ErrorEnvelope::unexpected(
@@ -802,6 +925,19 @@ mod tests {
         assert_eq!(
             base_requirement.ready_state_fingerprint,
             changed_requirement.ready_state_fingerprint
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "experimental-dfrr-kernel")]
+    #[test]
+    fn dfrr_kernel_config_defaults_to_segmented_source_path() -> InfraResult<()> {
+        use semantic_code_dfrr_hnsw::DfrrVectorRuntimePathKind;
+
+        let config = build_dfrr_kernel_config(&DfrrSearchConfig::default(), Some(384))?;
+        assert_eq!(
+            config.vector_runtime_path,
+            DfrrVectorRuntimePathKind::SegmentedSourceV1
         );
         Ok(())
     }

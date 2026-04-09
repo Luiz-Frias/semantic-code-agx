@@ -1,6 +1,6 @@
-# semantic-code-agents-rs
+# semantic-code-agx
 
-[![CI](https://github.com/Luiz-Frias/semantic-code-agents-rs/workflows/CI/badge.svg)](https://github.com/Luiz-Frias/semantic-code-agents-rs/actions)
+[![CI](https://github.com/Luiz-Frias/semantic-code-agx/workflows/CI/badge.svg)](https://github.com/Luiz-Frias/semantic-code-agx/actions)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](https://www.rust-lang.org/)
 
@@ -33,10 +33,10 @@ Traditional code search (grep, ripgrep) finds exact matches. Semantic search und
 Choose one install method:
 
 - `brew install luiz-frias/tap/semantic-code`
-- `curl -fsSL https://github.com/Luiz-Frias/semantic-code-agents-rs/releases/latest/download/install.sh | sh`
+- `curl -fsSL https://github.com/Luiz-Frias/semantic-code-agx/releases/latest/download/install.sh | sh`
 - `winget install --id Luiz-Frias.SemanticCode -e` (Windows)
-- `scoop bucket add semantic-code https://github.com/Luiz-Frias/semantic-code-agents-rs && scoop install semantic-code` (Windows)
-- `mise use -g github:Luiz-Frias/semantic-code-agents-rs@latest`
+- `scoop bucket add semantic-code https://github.com/Luiz-Frias/semantic-code-agx && scoop install semantic-code` (Windows)
+- `mise use -g github:Luiz-Frias/semantic-code-agx@latest`
 - `cargo install semantic-code-cli --locked`
 
 This installs the `sca` and `semantic-code` commands.
@@ -114,8 +114,8 @@ Full documentation is available in [`docs/`](docs/README.md):
 ### Setup
 
 ```bash
-git clone https://github.com/Luiz-Frias/semantic-code-agents-rs.git
-cd semantic-code-agents-rs
+git clone https://github.com/Luiz-Frias/semantic-code-agx.git
+cd semantic-code-agx
 mise install
 just setup
 ```

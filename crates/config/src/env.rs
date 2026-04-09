@@ -206,6 +206,11 @@ pub const ENV_VECTOR_DB_USERNAME: &str = "SCA_VECTOR_DB_USERNAME";
 /// Env var: vector DB auth password (secret).
 // gitleaks:allow
 pub const ENV_VECTOR_DB_PASSWORD: &str = "SCA_VECTOR_DB_PASSWORD";
+/// Env var: HNSW max connections per node (M parameter, default: 32).
+pub const ENV_VECTOR_DB_HNSW_MAX_NB_CONNECTION: &str = "SCA_VECTOR_DB_HNSW_MAX_NB_CONNECTION";
+/// Env var: HNSW construction beam width (`ef_construction`, default: 200).
+pub const ENV_VECTOR_DB_HNSW_EF_CONSTRUCTION: &str = "SCA_VECTOR_DB_HNSW_EF_CONSTRUCTION";
+
 /// Env var: DFRR BQ1 threshold ratio override.
 pub const ENV_VECTOR_DB_DFRR_BQ1_THRESHOLD: &str = "SCA_VECTOR_DB_DFRR_BQ1_THRESHOLD";
 /// Env var: DFRR BQ1 percentile-assist sample count override.
@@ -311,6 +316,8 @@ const STD_ENV_KEYS: &[&str] = &[
     ENV_VECTOR_DB_SEARCH_STRATEGY,
     ENV_VECTOR_DB_EXPERIMENTAL_U8_SEARCH,
     ENV_VECTOR_DB_FORCE_REINDEX_ON_KERNEL_CHANGE,
+    ENV_VECTOR_DB_HNSW_MAX_NB_CONNECTION,
+    ENV_VECTOR_DB_HNSW_EF_CONSTRUCTION,
     ENV_VECTOR_DB_BASE_URL,
     ENV_VECTOR_DB_ADDRESS,
     ENV_VECTOR_DB_DATABASE,
@@ -459,6 +466,10 @@ pub struct BackendEnv {
     pub vector_db_experimental_u8_search: Option<bool>,
     /// Override for `vectorDb.forceReindexOnKernelChange`.
     pub vector_db_force_reindex_on_kernel_change: Option<bool>,
+    /// Override for `vectorDb.hnswBuild.maxNbConnection`.
+    pub vector_db_hnsw_max_nb_connection: Option<u32>,
+    /// Override for `vectorDb.hnswBuild.efConstruction`.
+    pub vector_db_hnsw_ef_construction: Option<u32>,
     /// Override for `vectorDb.baseUrl`.
     pub vector_db_base_url: Option<Box<str>>,
     /// Override for `vectorDb.address`.
@@ -569,6 +580,8 @@ struct VectorDbEnvOverrides {
     search_strategy: Option<VectorSearchStrategy>,
     experimental_u8_search: Option<bool>,
     force_reindex_on_kernel_change: Option<bool>,
+    hnsw_max_nb_connection: Option<u32>,
+    hnsw_ef_construction: Option<u32>,
     base_url: Option<Box<str>>,
     address: Option<Box<str>>,
     database: Option<Box<str>>,
@@ -857,6 +870,8 @@ fn parse_vectordb_env(
             map,
             ENV_VECTOR_DB_FORCE_REINDEX_ON_KERNEL_CHANGE,
         )?,
+        hnsw_max_nb_connection: parse_optional_u32(map, ENV_VECTOR_DB_HNSW_MAX_NB_CONNECTION)?,
+        hnsw_ef_construction: parse_optional_u32(map, ENV_VECTOR_DB_HNSW_EF_CONSTRUCTION)?,
         base_url: parse_optional_url_string(map, ENV_VECTOR_DB_BASE_URL)?,
         address: parse_optional_trimmed_string(map, ENV_VECTOR_DB_ADDRESS)?,
         database: parse_optional_trimmed_string(map, ENV_VECTOR_DB_DATABASE)?,
@@ -962,6 +977,8 @@ impl BackendEnv {
             vector_db_search_strategy: vectordb.search_strategy,
             vector_db_experimental_u8_search: vectordb.experimental_u8_search,
             vector_db_force_reindex_on_kernel_change: vectordb.force_reindex_on_kernel_change,
+            vector_db_hnsw_max_nb_connection: vectordb.hnsw_max_nb_connection,
+            vector_db_hnsw_ef_construction: vectordb.hnsw_ef_construction,
             vector_db_base_url: vectordb.base_url,
             vector_db_address: vectordb.address,
             vector_db_database: vectordb.database,
@@ -1179,11 +1196,9 @@ fn apply_embedding_cache_env_overrides(config: &mut BackendConfig, env: &Backend
 }
 
 fn apply_vector_db_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {
+    apply_vector_db_connection_env_overrides(config, env);
+
     let mapper = EnvConfigMapper::new(config);
-    EnvConfigMapper::set_opt_box_str(
-        &mut mapper.config.vector_db.provider,
-        env.vector_db_provider.as_deref(),
-    );
     EnvConfigMapper::set_opt_index_mode(
         &mut mapper.config.vector_db.index_mode,
         env.vector_db_index_mode,
@@ -1224,6 +1239,23 @@ fn apply_vector_db_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {
         &mut mapper.config.vector_db.force_reindex_on_kernel_change,
         env.vector_db_force_reindex_on_kernel_change,
     );
+
+    crate::HnswBuildConfig::merge_env_overrides(
+        &mut mapper.config.vector_db.hnsw_build,
+        env.vector_db_hnsw_max_nb_connection,
+        env.vector_db_hnsw_ef_construction,
+    );
+
+    apply_vector_db_dfrr_search_env_overrides(config, env);
+}
+
+/// Connection, endpoint, and auth credential overrides for the vector DB.
+fn apply_vector_db_connection_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {
+    let mapper = EnvConfigMapper::new(config);
+    EnvConfigMapper::set_opt_box_str(
+        &mut mapper.config.vector_db.provider,
+        env.vector_db_provider.as_deref(),
+    );
     EnvConfigMapper::set_opt_box_str(
         &mut mapper.config.vector_db.base_url,
         env.vector_db_base_url.as_deref(),
@@ -1249,33 +1281,38 @@ fn apply_vector_db_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {
         &mut mapper.config.vector_db.password,
         env.vector_db_password.as_ref().map(SecretString::expose),
     );
+}
 
-    if env.vector_db_dfrr_bq1_threshold.is_some()
-        || env
+/// DFRR BQ1 threshold and percentile-assist overrides for the vector DB.
+fn apply_vector_db_dfrr_search_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {
+    if env.vector_db_dfrr_bq1_threshold.is_none()
+        && env
             .vector_db_dfrr_bq1_percentile_assist_sample_count
-            .is_some()
-        || env
+            .is_none()
+        && env
             .vector_db_dfrr_bq1_percentile_assist_target_rank
-            .is_some()
+            .is_none()
     {
-        let dfrr_search = mapper
-            .config
-            .vector_db
-            .dfrr_search
-            .get_or_insert_with(DfrrSearchConfig::default);
-        EnvConfigMapper::set_opt_dfrr_bq1_threshold(
-            &mut dfrr_search.bq1_threshold,
-            env.vector_db_dfrr_bq1_threshold,
-        );
-        EnvConfigMapper::set_opt_usize(
-            &mut dfrr_search.bq1_percentile_assist_sample_count,
-            env.vector_db_dfrr_bq1_percentile_assist_sample_count,
-        );
-        EnvConfigMapper::set_opt_dfrr_bq1_threshold(
-            &mut dfrr_search.bq1_percentile_assist_target_rank,
-            env.vector_db_dfrr_bq1_percentile_assist_target_rank,
-        );
+        return;
     }
+    let mapper = EnvConfigMapper::new(config);
+    let dfrr_search = mapper
+        .config
+        .vector_db
+        .dfrr_search
+        .get_or_insert_with(DfrrSearchConfig::default);
+    EnvConfigMapper::set_opt_dfrr_bq1_threshold(
+        &mut dfrr_search.bq1_threshold,
+        env.vector_db_dfrr_bq1_threshold,
+    );
+    EnvConfigMapper::set_opt_usize(
+        &mut dfrr_search.bq1_percentile_assist_sample_count,
+        env.vector_db_dfrr_bq1_percentile_assist_sample_count,
+    );
+    EnvConfigMapper::set_opt_dfrr_bq1_threshold(
+        &mut dfrr_search.bq1_percentile_assist_target_rank,
+        env.vector_db_dfrr_bq1_percentile_assist_target_rank,
+    );
 }
 
 fn apply_sync_env_overrides(config: &mut BackendConfig, env: &BackendEnv) {

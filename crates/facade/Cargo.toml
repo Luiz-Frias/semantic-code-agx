@@ -16,8 +16,8 @@ default = []
 milvus = ["milvus-grpc", "milvus-rest"]
 milvus-grpc = ["semantic-code-infra/milvus-grpc"]
 milvus-rest = ["semantic-code-infra/milvus-rest"]
-experimental-dfrr-kernel = ["semantic-code-infra/experimental-dfrr-kernel"]  # Stub — no private dep wired
-ane = ["semantic-code-infra/ane"]  # Stub — no private dep wired
+experimental-dfrr-kernel = ["semantic-code-infra/experimental-dfrr-kernel"]
+ane = []  # stub: forwarding to private dep
 
 [dependencies]
 semantic-code-infra.workspace = true

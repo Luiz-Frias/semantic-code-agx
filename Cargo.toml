@@ -1,5 +1,5 @@
 # =============================================================================
-# WORKSPACE CARGO.TOML - semantic-code-agents-rs
+# WORKSPACE CARGO.TOML - semantic-code-agx
 # =============================================================================
 # Rust modular monolith with hexagonal architecture.
 # CLI-first semantic code search engine.
@@ -36,7 +36,7 @@ members = [
   "crates/app",
   "crates/infra",
   "crates/facade",
-  # "crates/testkit",  # Internal test doubles — excluded from public builds
+  #   "crates/testkit",  # internal test doubles
 
   # ─────────────────────────────────────────────────────────────────────────
   # CLI
@@ -48,12 +48,12 @@ members = [
 # WORKSPACE PACKAGE METADATA
 # =============================================================================
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.96.0"
 authors = ["Luiz Frias <luizf35@gmail.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Luiz-Frias/semantic-code-agents-rs"
+repository = "https://github.com/Luiz-Frias/semantic-code-agx"
 keywords = ["semantic-search", "code-search", "embeddings", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -77,7 +77,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
-toml = "0.8"
+toml = "1"
 url = "2"
 schemars = "0.8"
 
@@ -104,8 +104,8 @@ tokenizers = "0.22.2"
 # ─────────────────────────────────────────────────────────────────────────────
 # HASHING
 # ─────────────────────────────────────────────────────────────────────────────
-md5 = "0.7"
-sha2 = "0.10"
+md5 = "0.8"
+sha2 = "0.11"
 crc32fast = "1"
 rustc-hash = "2"
 uuid = { version = "1", features = ["v4"] }
@@ -162,7 +162,7 @@ rayon = "1"
 # TESTING
 # ─────────────────────────────────────────────────────────────────────────────
 proptest = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATABASE
@@ -173,30 +173,31 @@ sqlx = { version = "0.8", default-features = false, features = [
 tiberius = { version = "0.12", default-features = false, features = ["rustls"] }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PRIVATE FEATURE DEPS (not available on crates.io — BSL-1.1)
-# These are commented out in the public repo. Code gated behind their
-# features (#[cfg(feature = "ane")] / #[cfg(feature = "experimental-dfrr-kernel")])
-# is inert unless you supply local overrides. See CONTRIBUTING.md for setup.
+# DFRR KERNEL (private repo, BSL-1.1)
 # ─────────────────────────────────────────────────────────────────────────────
-# semantic-code-dfrr-hnsw = { git = "ssh://...", tag = "v0.9.0" }
-# ane-inference = { git = "ssh://...", branch = "main" }
+# semantic-code-dfrr-hnsw = { git = "ssh://git@github.com/Luiz-Frias/dfrr-kernel-rs.git", tag = "v0.9.0" }  # private: requires SSH access
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANE INFERENCE (private repo, BSL-1.1 — Apple Neural Engine embedding inference)
+# ─────────────────────────────────────────────────────────────────────────────
+# ane-inference = { git = "ssh://git@github.com/Luiz-Frias/ane-inference-rs.git", branch = "main" }  # private: requires SSH access
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WORKSPACE CRATES (internal dependencies)
 # ─────────────────────────────────────────────────────────────────────────────
-semantic-code-core = { path = "crates/core", version = "0.3.0" }
-semantic-code-shared = { path = "crates/shared", version = "0.3.0" }
-semantic-code-validate-derive = { path = "crates/validate-derive", version = "0.3.0" }
-semantic-code-domain = { path = "crates/domain", version = "0.3.0" }
-semantic-code-ports = { path = "crates/ports", version = "0.3.0" }
-semantic-code-config = { path = "crates/config", version = "0.3.0" }
-semantic-code-api = { path = "crates/api", version = "0.3.0" }
-semantic-code-vector = { path = "crates/vector", version = "0.3.0" }
-semantic-code-adapters = { path = "crates/adapters", version = "0.3.0" }
-semantic-code-app = { path = "crates/app", version = "0.3.0" }
-semantic-code-infra = { path = "crates/infra", version = "0.3.0" }
-semantic-code-facade = { path = "crates/facade", version = "0.3.0" }
-# semantic-code-testkit = { path = "crates/testkit", version = "0.3.0" }  # Internal
+semantic-code-core = { path = "crates/core", version = "0.4.0" }
+semantic-code-shared = { path = "crates/shared", version = "0.4.0" }
+semantic-code-validate-derive = { path = "crates/validate-derive", version = "0.4.0" }
+semantic-code-domain = { path = "crates/domain", version = "0.4.0" }
+semantic-code-ports = { path = "crates/ports", version = "0.4.0" }
+semantic-code-config = { path = "crates/config", version = "0.4.0" }
+semantic-code-api = { path = "crates/api", version = "0.4.0" }
+semantic-code-vector = { path = "crates/vector", version = "0.4.0" }
+semantic-code-adapters = { path = "crates/adapters", version = "0.4.0" }
+semantic-code-app = { path = "crates/app", version = "0.4.0" }
+semantic-code-infra = { path = "crates/infra", version = "0.4.0" }
+semantic-code-facade = { path = "crates/facade", version = "0.4.0" }
+# semantic-code-testkit = { path = "crates/testkit", version = "0.4.0" }  # internal test doubles
 
 # =============================================================================
 # WORKSPACE LINTS
@@ -288,14 +289,17 @@ codegen-units = 1
 strip = true
 
 # =============================================================================
-# PATCH: Resolve workspace crates for local development.
-# When private feature-gated deps (DFRR, ANE) are enabled, their transitive
-# workspace deps need patching since they aren't published to crates.io yet.
+# PATCH: Resolve private-repo transitive deps to local workspace crates.
+# The dfrr-kernel-rs crate declares `semantic-code-shared = "0.2"` and
+# `semantic-code-vector = "0.2"` as crates.io deps. Since these aren't
+# published yet, we patch them to resolve from the workspace instead.
 # =============================================================================
 [patch.crates-io]
 semantic-code-shared = { path = "crates/shared" }
 semantic-code-vector = { path = "crates/vector" }
 
+# Local override for the private DFRR kernel while refactors are in-flight.
+# This keeps `--all-features` checks aligned with sibling workspace changes.
 [profile.release-with-debug]
 inherits = "release"
 debug = true
